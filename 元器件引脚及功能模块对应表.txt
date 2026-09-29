@@ -1,0 +1,603 @@
+﻿====================================================================================================
+ 宠物环（LIHAObohuan）工程 — 元器件引脚及功能模块对应表
+====================================================================================================
+数据来源   : 嘉立创EDA专业版 · 实时API网表导出（EasyEDA格式）
+工程       : suhatm/LIHAObohuan（团队工程，2块板 / 8页原理图）
+主板 fubenxiangmu : 7页 / 113个器件（nRF54L15主控 + nPM1300电源 + PVDF心率 + QVAR-B + 存储 + 双PDM麦克风）
+柔性板 felxboard : 1页(P1) / 18个器件（板载IMU + 温度传感器 + QVAR-A电极），经FPC排线连主板
+====================================================================================================
+
+目录：
+  一、功能模块划分总览
+  二、核心器件引脚总表（IC/晶振/连接器，逐引脚标注模块与功能）
+  三、无源器件网络归属表（R/C/L/D/FB/TP，按页分组）
+  四、总线挂载表（I2C / SPI / PDM / QVAR / SWD）
+  五、FPC跨板连接对照表（主板FPC1 ↔ 柔性板FPC1，翻转对接）
+  六、电源树
+
+====================================================================================================
+一、功能模块划分总览
+====================================================================================================
+
+■ 1. 主控与时钟（页:nRF54L15_qfaa_4L_config1）
+  器件: U1(nRF54L15-QFAA), X1, X2, C3, C4, C7, C8, C10, C13, R1, U11
+  说明: nRF54L15-QFAA（BLE 5.4 SoC）最小系统：双晶振（32.768kHz睡眠 + 32MHz射频）、复位RC（R1/C13）、SWD调试焊盘U11（SWDCLK/SWDIO/NRESET/GND/VTREF）。
+
+■ 2. 主控内部DCDC电源（页:nRF54L15_qfaa_4L_config1）
+  器件: L1, FB1, C1, C2, C5, C12
+  说明: DCC—L1 4.7uH—DECD—FB1磁珠—DECA/DECRF；C1/C2/C5/C12多级去耦（数字电源→射频电源隔离）。
+
+■ 3. 电源与充电管理（页:pw&charge）
+  器件: U7(nPM1300-QEAA-R7), U9(YZ120815025R-02040-01), U10(TPS7A2030PDBVR), CN1, SW1, D1, LED1, LED2, L5, C35, C36, C37, C38, C39, C40, C41, C42, C43, C44, C45, C46, C49, R3, R21, R22, R23, R24, R25
+  说明: nPM1300(U7)电源管理IC：Buck2→VDD_SYS_3V0数字轨；LDO1→VDD_SENS_3V0传感轨；LDO2→VDD_STORE_3V0_SW存储轨；充电：U9触点→D1→VBUS；电池CN1+NTC测温；开机键SW1；充电/状态LED×2；TPS7A2030(U10)模拟LDO（VSYS→VDD_ANA_3V0，受主控ANA_EN控制）供PVDF运放。
+
+■ 4. BLE射频天线（页:i2c&ble，匹配件部分在主控页）
+  器件: U2(RFANT3216120A5T), L2, L3, L4, L6, C6, C9, C11, C14, C15
+  说明: U1 ANT→L2 2.7nH→π型匹配(L3/L4/C9/C6/C11)→L6→RFANT3216120A5T芯片天线(U2)；C14/C15为NC调试预留。
+
+■ 5. 传感器I2C总线与主板IMU（页:i2c&ble）
+  器件: U4(LSM6DSV16XTR), FPC1, R2, R4, R6, C18, C19, C21
+  说明: SENS_I2C(SDA=P1.02/SCL=P1.03，4.7kΩ上拉R2/R4)：挂载主板IMU U4(LSM6DSV16X，含QVAR-B通道)与FPC1(经排线挂柔性板IMU+温度传感器)；R6 0Ω设U4地址；C18/C19/C21去耦。
+
+■ 6. PDM数字麦克风×2（页:mic）
+  器件: U5(IM69D128SV01XTMA1), U6(IM69D128SV01XTMA1), R7, R8, C22, C23
+  说明: IM69D128 Infineon PDM麦克风两只：共享时钟MIC_PDM_CLK(主控P1.12)，数据经R7/R8 100Ω汇至MIC_PDM_DIN(主控P1.10)。
+
+■ 7. PVDF压电信号调理链（页:pvdf）
+  器件: U8(OPA4391PWR), H2, TP1, TP2, TP3, TP5, TP6, TP7, R9, R10, R11, R12, R13, R14, R15, R16, R17, R18, R19, R20, C24, C25, C26, C27, C28, C29, C30, C31, C32, C33, C34, C47, C48
+  说明: OPA4391(U8)四运放：CH1=VBIAS虚地生成(R9/R10分压)；CH2=PVDF电荷放大器(H2传感器→R12→电荷节点，R18 250MΩ反馈)；CH3=低通缓冲→ADC_RAW(主控AIN6)；CH4=高通增益级→HEART_AA→ADC_HEART(主控AIN1)；ADC_REF基准监测；TP1/TP3/TP5/TP6/TP7=模拟/地/各ADC信号测试点。
+
+■ 8. QVAR通道B·主板侧（页:qvar）
+  器件: D4, D5, R29, R30, C54, C55
+  说明: 人体准静态感应B通道：电极信号经FPC(BQ1/BQ2)→ESD(D4/D5)→499Ω串阻(R29/R30)→110pF滤波(C54/C55)→主板IMU U4的Qvar1/Qvar2引脚。
+
+■ 9. SD NAND存储（页:sd + 主控页的R27）
+  器件: U12(CSNP1GCR01-BOW), R26, R27, C50, C51
+  说明: CSNP1GCR01 8引脚SD NAND(SPI模式)：CSN/MOSI/MISO/SCK接主控P2.05/P2.02/P2.04/P2.01(经R27 33Ω)，电源VDD_STORE_3V0_SW可控、R26 47k上拉。
+
+■ 10. 柔性板IMU与温度传感（柔性板页:P1）
+  器件: U1(LSM6DSV16XTR), U2(TMP112AIDRLR), R1, C1, C2, C3, C6
+  说明: 柔性板板载LSM6DSV16X IMU(U1，含QVAR-A通道) + TMP112温度传感器(U2)，均挂SENS_I2C；R1 0Ω设地址。
+
+■ 11. QVAR通道A·柔性板电极（柔性板页:P1）
+  器件: D1, D2, R2, R3, R4, R5, R6, R7, C4, C5
+  说明: 皮肤接触电极AQ1/AQ2：R2+R4(10M+10M)、R7+R5构成中点偏置，499Ω串阻(R3/R6)+110pF(C4/C5)滤波，ESD保护(D1/D2)，进入柔性板IMU的Qvar1/Qvar2引脚。
+
+■ 12. 跨板FPC接口（主板侧+i2c&ble页 / 柔性板P1页）
+  器件: FPC1
+  说明: 20Pin FPC连接器×2(主板FPC1/柔性板FPC1)：传输VDD_SENS_3V0、SENS_I2C×2、IMU中断×2、BQ1/BQ2电极线×2、预留×4，其余为GND(翻转对接，详见第五节)。
+
+====================================================================================================
+二、核心器件引脚总表
+====================================================================================================
+格式：引脚号 | 引脚名 | 网络 | 所属功能模块 | 功能说明
+
+◆◆◆ 主板 fubenxiangmu ◆◆◆
+----------------------------------------------------------------------------------------------------
+主板核心器件（IC/晶振/连接器/接口）
+----------------------------------------------------------------------------------------------------
+  [U1]  nRF54L15-QFAA  · Nordic Semiconductor  · 原理图页: nRF54L15_qfaa_4L_config1（主控）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     P1.00/XL1                P1.00/XL1               主控·时钟               32.768kHz睡眠晶振输入
+  2     P1.01/XL2                P1.01/XL2               主控·时钟               32.768kHz睡眠晶振输出
+  3     P1.02/NFC1               SENS_I2C_SDA            总线·SENS_I2C         传感器I2C·SDA（挂主板IMU，经FPC挂柔性板IMU/温度计）
+  4     P1.03/NFC2/CK            SENS_I2C_SCL            总线·SENS_I2C         传感器I2C·SCL
+  5     P1.04/AIN0/CK            IMU_REF_INT2            中断                  主板IMU(U4)中断2输入
+  6     P1.05/AIN1               ADC_HEART               模拟·PVDF链            ADC输入：PVDF心率信号(ADC_HEART)
+  7     P1.06/AIN2               ANA_EN                  电源·模拟3V0            GPIO输出：模拟电源使能(ANA_EN，控U10 LDO)
+  8     P1.07/AIN3               PMIC_TWI_SDA            总线·PMIC_TWI         PMIC I2C·SDA
+  9     P1.08/EXTREF/CLK16M/CK   PMIC_TWI_SCL            总线·PMIC_TWI         PMIC I2C·SCL
+  10    VDD                      VDD_SYS_3V0             电源·数字3V0            数字电源VDD_SYS_3V0
+  11    P2.00                    -                       悬空/未连接              悬空
+  12    P2.01/CK                 $2N80                   总线·SPI存储            SPI存储时钟(经R27串阻→STORE_SCK)
+  13    P2.02                    STORE_MOSI              总线·SPI存储            SPI存储MOSI(主出→U12 CMD)
+  14    P2.03                    -                       悬空/未连接              悬空
+  15    P2.04                    STORE_MISO              总线·SPI存储            SPI存储MISO(主入←U12 SDD0)
+  16    P2.05                    STORE_CSN               总线·SPI存储            SPI存储片选CSN
+  17    P2.06/CK                 P2.06                   预留GPIO              悬空(预留)
+  18    P2.07/SWO                SWO                     调试接口                SWO调试跟踪输出
+  19    P2.08                    P2.08                   预留GPIO              悬空(预留)
+  20    P2.09                    P2.09                   预留GPIO              悬空(预留)
+  21    P2.10                    P2.10                   预留GPIO              悬空(预留)
+  22    VDD                      VDD_SYS_3V0             电源·数字3V0            数字电源VDD_SYS_3V0
+  23    P0.00                    IMU_REF_INT1            中断                  主板IMU(U4)中断1输入
+  24    P0.01                    IMU_BODY_INT1           中断                  柔性板IMU中断1输入(经FPC)
+  25    SWDIO                    SWDIO                   调试接口                SWD调试数据
+  26    SWDCLK                   SWDCLK                  调试接口                SWD调试时钟
+  27    P0.02                    -                       悬空/未连接              悬空
+  28    P0.03/CK                 PMIC_IRQ_N              中断                  PMIC中断输入PMIC_IRQ_N(低有效)
+  29    P0.04/CK                 EXT_SYNC_IN             预留GPIO              外部同步输入(预留)EXT_SYNC_IN
+  30    ~RESET~                  $2N46                   主控·复位               系统复位(R1上拉+C13滤波；经U11引出NRESET)
+  31    ANT                      $2N41                   射频·BLE天线            BLE射频输出→π型匹配网络→芯片天线U2
+  32    VSS_PA                   GND                     公共地                 功放地
+  33    DECRF                    DECA                    电源·主控DCDC           内部DCDC射频电源(经FB1→DECD，C2/C5/C12去耦)
+  34    XC1                      XC1                     主控·时钟               32MHz晶振(X2)
+  35    XC2                      XC2                     主控·时钟               32MHz晶振(X2)
+  36    VDD                      VDD_SYS_3V0             电源·数字3V0            数字电源VDD_SYS_3V0
+  37    P1.09                    GPIO_FREE_1_09          预留GPIO              自由GPIO(预留测试)
+  38    P1.10                    MIC_PDM_DIN             总线·PDM麦克风           PDM麦克风数据输入MIC_PDM_DIN
+  39    P1.11/AIN4/CK            IMU_BODY_INT2           中断                  柔性板IMU中断2输入(经FPC)
+  40    P1.12/AIN5/CK            MIC_PDM_CLK             总线·PDM麦克风           PDM麦克风时钟输出MIC_PDM_CLK
+  41    P1.13/AIN6               ADC_RAW                 模拟·PVDF链            ADC输入：PVDF低通原始信号(ADC_RAW)
+  42    P1.14/AIN7               ADC_REF                 模拟·PVDF链            ADC输入：模拟参考监测(ADC_REF)
+  43    DECA                     DECA                    电源·主控DCDC           内部DCDC射频电源(同33脚网络DECA)
+  44    VSS                      GND                     公共地                 地
+  45    DECD                     DECD                    电源·主控DCDC           内部DCDC电感输出(L1 4.7uH；C1去耦)
+  46    DCC                      DCC                     电源·主控DCDC           内部DCDC开关节点(L1另一端)
+  47    VDD                      VDD_SYS_3V0             电源·数字3V0            数字电源VDD_SYS_3V0
+  48    VDD                      VDD_SYS_3V0             电源·数字3V0            数字电源VDD_SYS_3V0
+  49    VSS                      GND                     公共地                 地
+
+  [U7]  nPM1300-QEAA-R7  · NORDIC  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     VOUT1                    VSYS                    电源·PMIC             Buck1输出=VSYS系统电源轨
+  2     PVSS1                    GND                     公共地                 功率地
+  3     SW1                      -                       悬空/未连接              Buck1开关节点(未用)
+  4     PVDD                     VSYS                    电源·PMIC             功率供电=VSYS
+  5     SW2                      $5N7                    电源·PMIC             Buck2开关节点→L5 2.2uH→VDD_SYS_3V0
+  6     PVSS2                    GND                     公共地                 功率地
+  7     GPIO0                    -                       悬空/未连接              通用IO(未用)
+  8     GPIO1                    PMIC_IRQ_N              中断                  PMIC中断输出(低有效)→主控
+  9     GPIO2                    -                       悬空/未连接              通用IO(未用)
+  10    GPIO3                    -                       悬空/未连接              通用IO(未用)
+  11    GPIO4                    -                       悬空/未连接              通用IO(未用)
+  12    VDDIO                    VDD_SYS_3V0             电源·数字3V0            逻辑电平参考=VDD_SYS_3V0
+  13    SDA                      PMIC_TWI_SDA            总线·PMIC_TWI         PMIC I2C数据(PMIC_TWI_SDA)
+  14    SCL                      PMIC_TWI_SCL            总线·PMIC_TWI         PMIC I2C时钟(PMIC_TWI_SCL)
+  15    SHPHLD                   $5N44                   电源·充电               开机/保持按键输入(SW1→GND)
+  16    VSET2                    $5N18                   电源·充电               充电目标电压设置(R21 150k)
+  17    VSET1                    GND                     公共地                 充电电压设置低位(接地)
+  18    NTC                      NTC                     电源·电池               电池NTC温度检测(R3 10k分压)
+  19    VBAT                     BAT+                    电源·电池               电池正极BAT+
+  20    VSYS                     VSYS                    电源·PMIC             系统电源轨(输出)
+  21    VBUS                     VBUS_5V_IN              电源·充电               充电5V输入(U9触点→D1→VBUS_5V_IN)
+  22    VBUSOUT                  $5N53                   电源·PMIC             充电通路输出(C35 1uF储能)
+  23    CC1                      GND                     公共地                 USB CC1(接地)
+  24    CC2                      GND                     公共地                 USB CC2(接地)
+  25    LED0                     $5N24                   电源·充电               状态LED0驱动→LED1(红)
+  26    LED1                     $5N25                   电源·充电               状态LED1驱动→LED2
+  27    LED2                     -                       悬空/未连接              状态LED2(未用)
+  28    LSIN1/VINLDO1            VDD_SYS_3V0             电源·数字3V0            LDO1输入=VDD_SYS_3V0
+  29    LSOUT1/VOUTLDO1          VDD_SENS_3V0            电源·传感3V0            LDO1输出=VDD_SENS_3V0传感器电源
+  30    LSIN2/VINLDO2            VDD_SYS_3V0             电源·数字3V0            LDO2输入=VDD_SYS_3V0
+  31    LSOUT2/VOUTLDO2          VDD_STORE_3V0_SW        电源·存储3V0            LDO2输出=VDD_STORE_3V0_SW存储电源(可控开关)
+  32    VOUT2                    VDD_SYS_3V0             电源·数字3V0            Buck2输出检测=VDD_SYS_3V0
+  33    AVSS                     GND                     公共地                 模拟地
+
+  [U8]  OPA4391PWR  · TI(德州仪器)  · 原理图页: pvdf（压电传感器调理）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     OUT1                     VBIAS                   模拟·PVDF链            CH1输出=VBIAS虚地(缓冲R9/R10中点)
+  2     IN1-                     VBIAS                   模拟·PVDF链            CH1反馈(接VBIAS，单位增益)
+  3     IN1+                     $6N3                    模拟·PVDF链            CH1输入=R9/R10分压中点(C24/C25去耦)
+  4     VCC                      VDD_ANA_3V0             电源·模拟3V0            模拟电源VDD_ANA_3V0
+  5     IN2+                     VBIAS                   模拟·PVDF链            CH2同相端=VBIAS
+  6     IN2-                     $6N12                   模拟·PVDF链            CH2反相端=电荷节点(R18 250MΩ//C34 4.7nF反馈)
+  7     OUT2                     CHARGEOUT               模拟·PVDF链            CH2输出=CHARGEOUT(PVDF电荷放大)
+  8     OUT3                     $6N19                   模拟·PVDF链            CH3输出=低通缓冲(→R13→ADC_RAW)
+  9     IN3-                     $6N19                   模拟·PVDF链            CH3反馈(单位增益)
+  10    IN3+                     $6N16                   模拟·PVDF链            CH3输入=$6N16(R19/R20低通后的信号)
+  11    GND                      GND                     公共地                 地
+  12    IN4+                     VBIAS                   模拟·PVDF链            CH4同相端=VBIAS
+  13    IN4-                     $6N31                   模拟·PVDF链            CH4反相端(C32 2.2uF耦合，R16 402k反馈增益≈-4)
+  14    OUT4                     $6N33                   模拟·PVDF链            CH4输出(→R17→HEART_AA→ADC_HEART)
+
+  [U4]  LSM6DSV16XTR  · ST(意法半导体)  · 原理图页: i2c&ble（传感总线与天线）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     SDO/SA0                  $3N27                   传感·主板IMU            I2C地址选择(R6 0Ω到地)
+  2     SDx/AH1/Qvar1            BQVAR1                  传感·QVAR-B           QVAR通道B输入1(电极经FPC+ESD+RC)
+  3     SCx/AH2/Qvar2            BQVAR2                  传感·QVAR-B           QVAR通道B输入2
+  4     INT1                     IMU_REF_INT1            中断                  运动中断1→主控P0.00
+  5     Vdd_IO                   VDD_SENS_3V0            电源·传感3V0            IO电源VDD_SENS_3V0
+  6     GND                      GND                     公共地                 地
+  7     GND                      GND                     公共地                 地
+  8     Vdd                      VDD_SENS_3V0            电源·传感3V0            核电源VDD_SENS_3V0
+  9     INT2                     IMU_REF_INT2            中断                  运动中断2→主控P1.04
+  10    OCS_Aux                  -                       悬空/未连接              辅助接口(未用)
+  11    SDO_Aux                  -                       悬空/未连接              辅助接口(未用)
+  12    CS                       VDD_SENS_3V0            电源·传感3V0            拉高至VDD_SENS(I2C模式，禁用SPI)
+  13    SCL                      SENS_I2C_SCL            总线·SENS_I2C         SENS_I2C时钟
+  14    SDA                      SENS_I2C_SDA            总线·SENS_I2C         SENS_I2C数据
+
+  [U5]  IM69D128SV01XTMA1  · Infineon(英飞凌)  · 原理图页: mic（PDM麦克风）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     VDD                      VDD_SENS_3V0            电源·传感3V0            电源VDD_SENS_3V0
+  2     CLOCK                    MIC_PDM_CLK             总线·PDM麦克风           PDM时钟MIC_PDM_CLK(主控P1.12)
+  3     DATA                     $4N7                    总线·PDM麦克风           PDM数据(经R7 100Ω→MIC_PDM_DIN→主控P1.10)
+  4     LR select                VDD_SENS_3V0            电源·传感3V0            声道选择接VDD(右时隙)
+  5     GND                      GND                     公共地                 地
+
+  [U6]  IM69D128SV01XTMA1  · Infineon(英飞凌)  · 原理图页: mic（PDM麦克风）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     VDD                      VDD_SENS_3V0            电源·传感3V0            电源VDD_SENS_3V0
+  2     CLOCK                    MIC_PDM_CLK             总线·PDM麦克风           PDM时钟MIC_PDM_CLK(主控P1.12)
+  3     DATA                     $4N8                    总线·PDM麦克风           PDM数据(经R8 100Ω→MIC_PDM_DIN→主控P1.10)
+  4     LR select                GND                     公共地                 声道选择接GND(左时隙)——与U5互补，双麦分时隙共用数据线
+  5     GND                      GND                     公共地                 地
+
+  [U10]  TPS7A2030PDBVR  · TI(德州仪器)  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     IN                       VSYS                    电源·PMIC             输入VSYS
+  2     GND                      GND                     公共地                 地
+  3     EN                       ANA_EN                  电源·模拟3V0            使能=ANA_EN(主控P1.06)
+  4     N/C                      -                       悬空/未连接              悬空
+  5     OUT                      VDD_ANA_3V0             电源·模拟3V0            U10 LDO输出：运放模拟电源(ANA_EN控制)
+
+  [U11]      · 原理图页: nRF54L15_qfaa_4L_config1（主控）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        SWDCLK                  调试接口                SWDCLK→主控
+  2     2                        SWDIO                   调试接口                SWDIO→主控
+  3     3                        NRESET                  主控·复位               NRESET复位(经R1到主控RESET)
+  4     4                        GND                     公共地                 地
+  5     5                        VDD_SYS_3V0             电源·数字3V0            电平参考VTREF=VDD_SYS_3V0
+
+  [U12]  CSNP1GCR01-BOW  · CS(创世)  · 原理图页: sd（SD NAND存储）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     SDD2                     -                       悬空/未连接              SPI模式未用
+  2     CD/SDD3                  STORE_CSN               总线·SPI存储            片选CS(STORE_CSN)
+  3     SCLK                     STORE_SCK               总线·SPI存储            SPI时钟(STORE_SCK，经R27)
+  4     VSS                      GND                     公共地                 地
+  5     CMD                      STORE_MOSI              总线·SPI存储            SPI MOSI(主控P2.02)
+  6     SDD0                     STORE_MISO              总线·SPI存储            SPI MISO(主控P2.04)
+  7     SDD1                     -                       悬空/未连接              SPI模式未用
+  8     VCC                      VDD_STORE_3V0_SW        电源·存储3V0            电源VDD_STORE_3V0_SW(PMIC LDO2可控)
+
+  [U9]  YZ120815025R-02040-01  · Xinyangze(鑫扬泽)  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        $5N47                   电源·充电               充电触点U9与D1之间节点
+  2     2                        GND                     公共地                 参考地
+
+  [X1]  NX2012SA-32.768KHZ-EXS00A-MU00646  · NDK  · 原理图页: nRF54L15_qfaa_4L_config1（主控）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     OSC1                     P1.01/XL2               主控·时钟               32.768kHz睡眠晶振(X1)
+  2     OSC2                     P1.00/XL1               主控·时钟               32.768kHz睡眠晶振(X1)
+
+  [X2]  32MHz  · 同晶  · 原理图页: nRF54L15_qfaa_4L_config1（主控）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        XC1                     主控·时钟               32MHz射频晶振(X2)
+  2     GND                      GND                     公共地                 参考地
+  3     3                        XC2                     主控·时钟               32MHz射频晶振(X2)
+  4     GND                      GND                     公共地                 参考地
+
+  [FPC1]  FPC-05F-20PH20  · XUNPU(讯普)  · 原理图页: i2c&ble（传感总线与天线）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        GND                     公共地                 参考地
+  2     2                        VDD_SENS_3V0            电源·传感3V0            PMIC LDO1输出：传感器/柔性板供电
+  3     3                        VDD_SENS_3V0            电源·传感3V0            PMIC LDO1输出：传感器/柔性板供电
+  4     4                        GND                     公共地                 参考地
+  5     5                        SENS_I2C_SCL            总线·SENS_I2C         传感器I2C时钟
+  6     6                        SENS_I2C_SDA            总线·SENS_I2C         传感器I2C数据
+  7     7                        GND                     公共地                 参考地
+  8     8                        IMU_BODY_INT1           中断                  柔性板IMU中断1(经FPC)→主控
+  9     9                        IMU_BODY_INT2           中断                  柔性板IMU中断2(经FPC)→主控
+  10    10                       GND                     公共地                 参考地
+  11    11                       BQ1                     传感·QVAR-B           电极B1(经FPC排线)
+  12    12                       BQ2                     传感·QVAR-B           电极B2(经FPC排线)
+  13    13                       GND                     公共地                 参考地
+  14    14                       FPC_RSVD1               跨板FPC接口             FPC预留信号1
+  15    15                       FPC_RSVD2               跨板FPC接口             FPC预留信号2
+  16    16                       GND                     公共地                 参考地
+  17    17                       FPC_RSVD3               跨板FPC接口             FPC预留信号3
+  18    18                       FPC_RSVD4               跨板FPC接口             FPC预留信号4
+  19    19                       GND                     公共地                 参考地
+  20    20                       GND                     公共地                 参考地
+  21    21                       GND                     公共地                 参考地
+  22    22                       GND                     公共地                 参考地
+
+  [CN1]  1.25-2PWT  · FG(富港)  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        BAT+                    电源·电池               电池正极（CN1接插件）
+  2     2                        GND                     公共地                 参考地
+  3     3                        GND                     公共地                 参考地
+  4     4                        GND                     公共地                 参考地
+
+  [H2]  PZ254R-11-02P  · XFCN(兴飞)  · 原理图页: pvdf（压电传感器调理）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        PVDF+                   模拟·PVDF链            PVDF压电传感器信号(H2接插件)
+  2     2                        VBIAS                   模拟·PVDF链            虚地偏置(U8-CH1缓冲生成)
+
+  [SW1]  GT-TC029B-H040-L1N  · G-Switch(品赞)  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        GND                     公共地                 参考地
+  2     2                        $5N44                   电源·充电               SHPHLD开机/保持按键(SW1)
+
+  [LED1]  KT-0603R  · KENTO  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     A                        VSYS                    电源·PMIC             nPM1300系统电源轨
+  2     K                        $5N24                   电源·充电               PMIC LED0驱动→LED1
+
+  [LED2]  MHT192DBCT  · MEIHUA(美华)  · 原理图页: pw&charge（电源与充电）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     K                        VSYS                    电源·PMIC             nPM1300系统电源轨
+  2     A                        $5N25                   电源·充电               PMIC LED1驱动→LED2
+
+  [U2]  RFANT3216120A5T  · Walsin(华新科)  · 原理图页: i2c&ble（传感总线与天线）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        $3N3                    射频·BLE天线            天线馈入(U2芯片天线)
+  2     2                        -                       悬空/未连接              悬空
+
+
+◆◆◆ 柔性板 felxboard ◆◆◆
+----------------------------------------------------------------------------------------------------
+柔性板核心器件
+----------------------------------------------------------------------------------------------------
+  [U1]  LSM6DSV16XTR  · ST(意法半导体)  · 原理图页: P1（柔性板）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     SDO/SA0                  $1N12                   传感·柔性板IMU           I2C地址选择(R1 0Ω到地)
+  2     SDx/AH1/Qvar1            AQVAR1                  传感·QVAR-A           QVAR通道A输入1(AQ1电极→R3/C4)
+  3     SCx/AH2/Qvar2            AQVAR2                  传感·QVAR-A           QVAR通道A输入2(AQ2电极→R6/C5)
+  4     INT1                     IMU_BODY_INT1           中断                  运动中断1→FPC→主控P0.01
+  5     Vdd_IO                   VDD_SENS_3V0            电源·传感3V0            IO电源VDD_SENS_3V0(经FPC)
+  6     GND                      GND                     公共地                 地
+  7     GND                      GND                     公共地                 地
+  8     Vdd                      VDD_SENS_3V0            电源·传感3V0            核电源VDD_SENS_3V0(经FPC)
+  9     INT2                     IMU_BODY_INT2           中断                  运动中断2→FPC→主控P1.11
+  10    OCS_Aux                  -                       悬空/未连接              辅助接口(未用)
+  11    SDO_Aux                  -                       悬空/未连接              辅助接口(未用)
+  12    CS                       VDD_SENS_3V0            电源·传感3V0            拉高至VDD_SENS(I2C模式)
+  13    SCL                      SENS_I2C_SCL            总线·SENS_I2C         SENS_I2C时钟(经FPC)
+  14    SDA                      SENS_I2C_SDA            总线·SENS_I2C         SENS_I2C数据(经FPC)
+
+  [U2]  TMP112AIDRLR  · TI(德州仪器)  · 原理图页: P1（柔性板）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     SCL                      SENS_I2C_SCL            总线·SENS_I2C         SENS_I2C时钟
+  2     GND                      GND                     公共地                 地
+  3     ALERT                    GND                     公共地                 报警中断(接地，未用)
+  4     ADD0                     GND                     公共地                 I2C地址选择(接地)
+  5     V+                       VDD_SENS_3V0            电源·传感3V0            电源VDD_SENS_3V0
+  6     SDA                      SENS_I2C_SDA            总线·SENS_I2C         SENS_I2C数据
+
+  [FPC1]  FPC-05F-20PH20  · XUNPU(讯普)  · 原理图页: P1（柔性板）
+  引脚    引脚名                   网络                    功能模块                功能说明
+  1     1                        GND                     公共地                 参考地
+  2     2                        GND                     公共地                 参考地
+  3     3                        FPC_RSVD4               跨板FPC接口             FPC预留信号4
+  4     4                        FPC_RSVD3               跨板FPC接口             FPC预留信号3
+  5     5                        GND                     公共地                 参考地
+  6     6                        FPC_RSVD2               跨板FPC接口             FPC预留信号2
+  7     7                        FPC_RSVD1               跨板FPC接口             FPC预留信号1
+  8     8                        GND                     公共地                 参考地
+  9     9                        BQ2                     传感·QVAR-B           电极B2(经FPC排线)
+  10    10                       BQ1                     传感·QVAR-B           电极B1(经FPC排线)
+  11    11                       GND                     公共地                 参考地
+  12    12                       IMU_BODY_INT2           中断                  柔性板IMU中断2(经FPC)→主控
+  13    13                       IMU_BODY_INT1           中断                  柔性板IMU中断1(经FPC)→主控
+  14    14                       GND                     公共地                 参考地
+  15    15                       SENS_I2C_SDA            总线·SENS_I2C         传感器I2C数据
+  16    16                       SENS_I2C_SCL            总线·SENS_I2C         传感器I2C时钟
+  17    17                       GND                     公共地                 参考地
+  18    18                       VDD_SENS_3V0            电源·传感3V0            PMIC LDO1输出：传感器/柔性板供电
+  19    19                       VDD_SENS_3V0            电源·传感3V0            PMIC LDO1输出：传感器/柔性板供电
+  20    20                       GND                     公共地                 参考地
+  21    21                       GND                     公共地                 参考地
+  22    22                       GND                     公共地                 参考地
+
+
+====================================================================================================
+三、无源器件网络归属表（R/C/L/D/FB/TP，按原理图页分组）
+====================================================================================================
+格式：位号 | 参数 | 1脚网络 | 2脚网络 | 所属模块 | 作用
+
+  ▶ 原理图页: nRF54L15_qfaa_4L_config1（主控）
+    C4    100nF           VDD_SYS_3V0           GND                   公共地 / 电源·数字3V0      电源去耦
+    C7    100nF           VDD_SYS_3V0           GND                   公共地 / 电源·数字3V0      电源去耦
+    C8    100nF           VDD_SYS_3V0           GND                   公共地 / 电源·数字3V0      电源去耦
+    FB1   BLM03AG121SN1D  DECD                  DECA                  电源·主控DCDC           磁珠滤波(DECD→DECA射频电源隔离)
+    C1    2.2uF           GND                   DECD                  公共地 / 电源·主控DCDC     信号滤波电容
+    C2    2.2uF           GND                   DECA                  公共地 / 电源·主控DCDC     信号滤波电容
+    C10   100nF           VDD_SYS_3V0           GND                   公共地 / 电源·数字3V0      电源去耦
+    C12   10nF            DECA                  GND                   公共地 / 电源·主控DCDC     信号滤波电容
+    L1    4.7uH           DCC                   DECD                  电源·主控DCDC           DCDC功率电感4.7uH
+    R1    1kΩ             $2N46                 NRESET                主控·复位               串联电阻(信号/ESD RC)
+    C5    2.2nF           DECA                  GND                   公共地 / 电源·主控DCDC     信号滤波电容
+    C3    10uF            GND                   VDD_SYS_3V0           公共地 / 电源·数字3V0      电源去耦
+    L3    3.5nH           $2N42                 $2N39                 射频·BLE天线            射频匹配电感
+    C11   0.3pF           GND                   RF                    公共地 / 射频·BLE天线      信号滤波电容
+    L2    2.7nH           $2N41                 $2N42                 射频·BLE天线            射频匹配电感
+    C6    1.5pF           GND                   $2N42                 公共地 / 射频·BLE天线      信号滤波电容
+    C9    2pF             GND                   $2N39                 公共地 / 射频·BLE天线      信号滤波电容
+    L4    3.5nH           $2N39                 RF                    射频·BLE天线            射频匹配电感
+    C13   3.9pF           $2N46                 GND                   主控·复位 / 公共地         信号滤波电容
+    R27   33Ω             STORE_SCK             $2N80                 总线·SPI存储            串联电阻(信号/ESD RC)
+
+  ▶ 原理图页: pw&charge（电源与充电）
+    C35   1uF             $5N53                 GND                   公共地 / 电源·PMIC       信号滤波电容
+    C36   1uF             VBUS_5V_IN            GND                   公共地 / 电源·充电         信号滤波电容
+    C37   1uF             VDD_SENS_3V0          GND                   公共地 / 电源·传感3V0      电源去耦
+    C38   1uF             VDD_STORE_3V0_SW      GND                   公共地 / 电源·存储3V0      电源去耦
+    C39   2.2uF           GND                   BAT+                  公共地 / 电源·电池         信号滤波电容
+    C40   10uF            GND                   VSYS                  公共地 / 电源·PMIC       电源去耦
+    C41   10uF            GND                   VDD_SYS_3V0           公共地 / 电源·数字3V0      电源去耦
+    C42   10uF            GND                   VSYS                  公共地 / 电源·PMIC       电源去耦
+    C43   100nF           VSYS                  GND                   公共地 / 电源·PMIC       电源去耦
+    C44   100nF           VDD_SYS_3V0           GND                   公共地 / 电源·数字3V0      电源去耦
+    C45   100nF           GND                   VSYS                  公共地 / 电源·PMIC       电源去耦
+    L5    2.2uH           VDD_SYS_3V0           $5N7                  电源·PMIC / 电源·数字3V0  Buck2功率电感2.2uH
+    R21   150kΩ           GND                   $5N18                 公共地 / 电源·充电         偏置/分压电阻
+    R24   47kΩ            VDD_SYS_3V0           PMIC_IRQ_N            中断 / 电源·数字3V0       偏置/分压电阻
+    R22   4.7kΩ           VDD_SYS_3V0           PMIC_TWI_SCL          总线·PMIC_TWI / 电源·数字3V0I2C上拉电阻
+    R23   4.7kΩ           VDD_SYS_3V0           PMIC_TWI_SDA          总线·PMIC_TWI / 电源·数字3V0I2C上拉电阻
+    D1    B5819WS-SL      VBUS_5V_IN            $5N47                 电源·充电               整流/开关二极管
+    C46   1uF             GND                   VSYS                  公共地 / 电源·PMIC       电源去耦
+    R25   100kΩ           GND                   ANA_EN                公共地 / 电源·模拟3V0      偏置/分压电阻
+    C49   1uF             GND                   VDD_ANA_3V0           公共地 / 电源·模拟3V0      电源去耦
+    R3    10kΩ            GND                   NTC                   公共地 / 电源·电池         偏置/分压电阻
+
+  ▶ 原理图页: i2c&ble（传感总线与天线）
+    C14   NC              GND                   $3N3                  公共地 / 射频·BLE天线      NC不贴装(射频调试预留)
+    C15   NC              GND                   RF                    公共地 / 射频·BLE天线      NC不贴装(射频调试预留)
+    C18   100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    C19   2.2uF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    C21   100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    R2    4.7kΩ           SENS_I2C_SDA          VDD_SENS_3V0          总线·SENS_I2C / 电源·传感3V0I2C上拉电阻
+    R4    4.7kΩ           SENS_I2C_SCL          VDD_SENS_3V0          总线·SENS_I2C / 电源·传感3V0I2C上拉电阻
+    R6    0Ω              $3N27                 VDD_SENS_3V0          传感·主板IMU / 电源·传感3V0 地址选择/跨接
+    L6    6.8nH           $3N3                  RF                    射频·BLE天线            射频匹配电感
+
+  ▶ 原理图页: mic（PDM麦克风）
+    C22   100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    C23   100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    R7    100Ω            $4N7                  MIC_PDM_DIN           总线·PDM麦克风           串联电阻(信号/ESD RC)
+    R8    100Ω            $4N8                  MIC_PDM_DIN           总线·PDM麦克风           串联电阻(信号/ESD RC)
+
+  ▶ 原理图页: pvdf（压电传感器调理）
+    R9    100kΩ           $6N3                  VDD_ANA_3V0           模拟·PVDF链 / 电源·模拟3V0 偏置/分压电阻
+    R10   100kΩ           GND                   $6N3                  公共地 / 模拟·PVDF链      偏置/分压电阻
+    R11   100kΩ           $6N27                 $6N31                 模拟·PVDF链            串联/反馈电阻
+    R12   47kΩ            $6N12                 PVDF+                 模拟·PVDF链            串联/反馈电阻
+    R13   1kΩ             $6N19                 ADC_RAW               模拟·PVDF链            串联电阻(信号/ESD RC)
+    R14   1kΩ             ADC_REF               VBIAS                 模拟·PVDF链            串联电阻(信号/ESD RC)
+    R15   1kΩ             HEART_AA              ADC_HEART             模拟·PVDF链            串联电阻(信号/ESD RC)
+    R16   402kΩ           $6N31                 $6N33                 模拟·PVDF链            串联/反馈电阻
+    R17   22kΩ            $6N33                 HEART_AA              模拟·PVDF链            串联/反馈电阻
+    C24   4.7uF           GND                   $6N3                  公共地 / 模拟·PVDF链      信号滤波电容
+    C25   100nF           GND                   $6N3                  公共地 / 模拟·PVDF链      信号滤波电容
+    C27   470nF           $6N19                 $6N20                 模拟·PVDF链            信号滤波电容
+    C29   220nF           VBIAS                 $6N16                 模拟·PVDF链            信号滤波电容
+    C30   10nF            ADC_REF               ADC_RAW               模拟·PVDF链            信号滤波电容
+    C31   10nF            ADC_HEART             ADC_REF               模拟·PVDF链            信号滤波电容
+    C32   2.2uF           CHARGEOUT             $6N27                 模拟·PVDF链            信号滤波电容
+    C33   33nF            $6N31                 $6N33                 模拟·PVDF链            信号滤波电容
+    R18   250M            $6N12                 CHARGEOUT             模拟·PVDF链            串联/反馈电阻
+    C34   4.7nF           CHARGEOUT             $6N12                 模拟·PVDF链            信号滤波电容
+    R19   24kΩ            CHARGEOUT             $6N20                 模拟·PVDF链            串联/反馈电阻
+    R20   24kΩ            $6N20                 $6N16                 模拟·PVDF链            串联/反馈电阻
+    C26   100nF           GND                   VDD_ANA_3V0           公共地 / 电源·模拟3V0      电源去耦
+    C28   220nF           VBIAS                 HEART_AA              模拟·PVDF链            信号滤波电容
+    TP1                   VDD_ANA_3V0           -                     电源·模拟3V0            测试点
+    TP2                   GND                   -                     公共地                 测试点
+    TP3                   VBIAS                 -                     模拟·PVDF链            测试点
+    TP5                   ADC_RAW               -                     模拟·PVDF链            测试点
+    TP6                   ADC_HEART             -                     模拟·PVDF链            测试点
+    TP7                   ADC_REF               -                     模拟·PVDF链            测试点
+    C47   100nF           GND                   VDD_ANA_3V0           公共地 / 电源·模拟3V0      电源去耦
+    C48   1uF             GND                   VDD_ANA_3V0           公共地 / 电源·模拟3V0      电源去耦
+
+  ▶ 原理图页: qvar（QVAR通道B）
+    D4    ESDALCL5-1BM2   GND                   BQ2                   传感·QVAR-B / 公共地     ESD保护二极管(信号对地)
+    D5    ESDALCL5-1BM2   BQ1                   GND                   传感·QVAR-B / 公共地     ESD保护二极管(信号对地)
+    C54   110pF           GND                   BQVAR1                传感·QVAR-B / 公共地     信号滤波电容
+    C55   110pF           BQVAR2                GND                   传感·QVAR-B / 公共地     信号滤波电容
+    R29   499Ω            BQVAR2                BQ2                   传感·QVAR-B           串联电阻(信号/ESD RC)
+    R30   499Ω            BQVAR1                BQ1                   传感·QVAR-B           串联电阻(信号/ESD RC)
+
+  ▶ 原理图页: sd（SD NAND存储）
+    C50   2.2uF           GND                   VDD_STORE_3V0_SW      公共地 / 电源·存储3V0      电源去耦
+    C51   100nF           GND                   VDD_STORE_3V0_SW      公共地 / 电源·存储3V0      电源去耦
+    R26   47kΩ            STORE_CSN             VDD_STORE_3V0_SW      总线·SPI存储 / 电源·存储3V0 偏置/分压电阻
+
+  ▶ 原理图页: P1（柔性板）
+    D1    ESDALCL5-1BM2   AQ1                   GND                   传感·QVAR-A / 公共地     ESD保护二极管(信号对地)
+    D2    ESDALCL5-1BM2   GND                   AQ2                   传感·QVAR-A / 公共地     ESD保护二极管(信号对地)
+    C5    110pF           AQVAR2                GND                   传感·QVAR-A / 公共地     信号滤波电容
+    C4    110pF           GND                   AQVAR1                传感·QVAR-A / 公共地     信号滤波电容
+    R6    499Ω            AQ2                   AQVAR2                传感·QVAR-A           串联电阻(信号/ESD RC)
+    R3    499Ω            AQ1                   AQVAR1                传感·QVAR-A           串联电阻(信号/ESD RC)
+    R4    10MΩ            VDD_SENS_3V0          AQ1                   传感·QVAR-A / 电源·传感3V0偏置/分压电阻
+    R5    10MΩ            AQ2                   VDD_SENS_3V0          传感·QVAR-A / 电源·传感3V0偏置/分压电阻
+    R7    10MΩ            GND                   AQ2                   传感·QVAR-A / 公共地     偏置/分压电阻
+    R2    10MΩ            AQ1                   GND                   传感·QVAR-A / 公共地     偏置/分压电阻
+    C2    100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    C1    100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    C3    2.2uF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+    R1    0Ω              $1N12                 GND                   传感·柔性板IMU / 公共地     地址选择/跨接
+    C6    100nF           GND                   VDD_SENS_3V0          公共地 / 电源·传感3V0      电源去耦
+
+====================================================================================================
+四、总线挂载表
+====================================================================================================
+
+┌─ SENS_I2C 传感器I2C总线（SDA=U1.P1.02/NFC1，SCL=U1.P1.03，电平VDD_SENS_3V0）
+│   主控侧  : U1 (nRF54L15)
+│   上拉    : R2/R4 4.7kΩ → VDD_SENS_3V0
+│   主板器件: U4 (LSM6DSV16X IMU·含QVAR-B) ── 地址选择R6 0Ω接地
+│   跨板经FPC: FPC1 → 柔性板 → U1 (LSM6DSV16X IMU·含QVAR-A, 地址选择R1 0Ω)
+│                       └→ U2 (TMP112A 温度传感器, ADD0接地)
+│   从机数量: 3（主板1 + 柔性板2）
+
+┌─ PMIC_TWI 电源管理I2C（SDA=U1.P1.07，SCL=U1.P1.08，电平VDD_SYS_3V0）
+│   主控侧  : U1
+│   上拉    : R22/R23 4.7kΩ
+│   从机    : U7 (nPM1300 PMIC)
+│   中断    : U7.GPIO1 → PMIC_IRQ_N → U1.P0.03（R24 47kΩ上拉）
+
+┌─ SPI 存储（主控U1 ↔ U12 SD NAND，SPI模式，电源VDD_STORE_3V0_SW可控）
+│   SCK : U1.P2.01 ──R27 33Ω──→ U12.SCLK   （网络$2N80 / STORE_SCK）
+│   MOSI: U1.P2.02 ─────────→ U12.CMD      （STORE_MOSI）
+│   MISO: U1.P2.04 ←───────── U12.SDD0     （STORE_MISO）
+│   CSN : U1.P2.05 ──R26 47kΩ上拉──→ U12.CD/SDD3（STORE_CSN）
+
+┌─ PDM 麦克风总线（2只IM69D128，电源VDD_SENS_3V0）
+│   CLK: U1.P1.12 → U5.CLK / U6.CLK        （MIC_PDM_CLK）
+│   DIN: U5.DATA ─R7 100Ω─┐→ U1.P1.10      （MIC_PDM_DIN）
+│        U6.DATA ─R8 100Ω─┘
+
+┌─ QVAR-A 人体感应通道（柔性板电极 → 柔性板IMU）
+│   电极AQ1: R4 10M↑VDD + R2 10M↓GND 中点偏置 → R3 499Ω → U1(flex).Qvar1（C4 110pF滤波，D1 ESD）
+│   电极AQ2: R5 10M↑VDD + R7 10M↓GND 中点偏置 → R6 499Ω → U1(flex).Qvar2（C5 110pF滤波，D2 ESD）
+
+┌─ QVAR-B 人体感应通道（电极经FPC排线 → 主板IMU）
+│   BQ1: FPC(主板pin11/柔性板pin10) → D5 ESD → R30 499Ω → U4.Qvar1（C54 110pF）
+│   BQ2: FPC(主板pin12/柔性板pin9)  → D4 ESD → R29 499Ω → U4.Qvar2（C55 110pF）
+
+┌─ SWD 调试（U11 5Pin焊盘）
+│   SWDCLK=U1.P2.06区(U1.26脚) / SWDIO / NRESET(经R1) / GND / VTREF=VDD_SYS_3V0；SWO=U1.P2.07(预留)
+
+====================================================================================================
+五、FPC跨板连接对照表（FPC-05F-20PH20 ×2，翻转对接：主板pin N ↔ 柔性板pin 21-N）
+====================================================================================================
+
+  主板pin │ 主板网络        │ ←→ │ 柔性板pin │ 柔性板网络     │ 说明
+  ----------------------------------------------------------------------------------------
+  1       │GND              │←→ │20        │GND            │地
+  2       │VDD_SENS_3V0     │←→ │19        │VDD_SENS_3V0   │直连信号
+  3       │VDD_SENS_3V0     │←→ │18        │VDD_SENS_3V0   │直连信号
+  4       │GND              │←→ │17        │GND            │地
+  5       │SENS_I2C_SCL     │←→ │16        │SENS_I2C_SCL   │直连信号
+  6       │SENS_I2C_SDA     │←→ │15        │SENS_I2C_SDA   │直连信号
+  7       │GND              │←→ │14        │GND            │地
+  8       │IMU_BODY_INT1    │←→ │13        │IMU_BODY_INT1  │直连信号
+  9       │IMU_BODY_INT2    │←→ │12        │IMU_BODY_INT2  │直连信号
+  10      │GND              │←→ │11        │GND            │地
+  11      │BQ1              │←→ │10        │BQ1            │直连信号
+  12      │BQ2              │←→ │9         │BQ2            │直连信号
+  13      │GND              │←→ │8         │GND            │地
+  14      │FPC_RSVD1        │←→ │7         │FPC_RSVD1      │直连信号
+  15      │FPC_RSVD2        │←→ │6         │FPC_RSVD2      │直连信号
+  16      │GND              │←→ │5         │GND            │地
+  17      │FPC_RSVD3        │←→ │4         │FPC_RSVD3      │直连信号
+  18      │FPC_RSVD4        │←→ │3         │FPC_RSVD4      │直连信号
+  19      │GND              │←→ │2         │GND            │地
+  20      │GND              │←→ │1         │GND            │地
+  21      │GND              │←→ │21        │GND             │屏蔽/地(直连)
+  22      │GND              │←→ │22        │GND             │屏蔽/地(直连)
+
+====================================================================================================
+六、电源树
+====================================================================================================
+
+  CN1 电池 BAT+ ──┬──────────────────────────────→ U7 nPM1300.VBAT
+                  └─ R3 10k + NTC ──→ U7.NTC（电池温度）
+
+  U9 充电触点 ──D1 B5819W──→ VBUS_5V_IN ──→ U7.VBUS（充电输入）── U7.VBUSOUT($5N53+C35)
+
+  U7 nPM1300 电源树：
+    ├─ Buck2 (SW2─L5 2.2uH) ──→ VDD_SYS_3V0  数字轨（U1四组VDD、U11.VTREF、U7.VDDIO、上拉R22/R23/R24）
+    ├─ LDO1 (LSOUT1)        ──→ VDD_SENS_3V0 传感轨（U4 IMU、U5/U6麦克风、上拉R2/R4；
+    │                                          经FPC→柔性板U1 IMU、U2温度计、QVAR-A偏置）
+    ├─ LDO2 (LSOUT2)        ──→ VDD_STORE_3V0_SW 存储轨（U12 SD NAND，PMIC可控开关电源）
+    └─ VSYS (Buck1/VOUT1)   ──→ U10 TPS7A2030 LDO ─(ANA_EN=U1.P1.06控制)→ VDD_ANA_3V0
+                                                                                     └─→ U8 OPA4391（PVDF模拟链）
+
+  主控U1内部DCDC：DCC ─L1 4.7uH─ DECD(C1 100nF) ─FB1磁珠─ DECA/DECRF(C2 2.2uF+C5 2.2nF+C12 10nF)
+
+====================================================================================================
+备注
+====================================================================================================
+  1. 位号缺口（网表中不存在）: C16,C17,C20 / R5,R28,R31+ / D2,D3(主板) / TP4 —— 属于删除或跳号，非遗漏。
+  2. C14/C15 参数为NC(不贴装)，为射频匹配调试预留焊盘。
+  3. U11（5脚）与U9（2脚）在库中无型号命名，按网络连接判定为：SWD调试焊盘 / 充电触点。
+  4. 多Part符号：U1(主控)在原理图上分4个Part放置，U8(运放)分4个Part(四通道)，网表已按位号合并。
+  5. 悬空/未连接引脚：U1的11/14/17/19/20/21/27脚(P2.00,P2.03,P2.06,P2.08,P2.09,P2.10,P0.02)、
+     U7的3/7/9/10/11/27脚(SW1,GPIO0,GPIO2,GPIO3,GPIO4,LED2)、U12的1/7脚(SDD2/SDD1)。
+  6. 本表由网表自动生成+人工标注：网络连接关系100%来自网表，功能说明基于网络命名与典型应用推断。
+
