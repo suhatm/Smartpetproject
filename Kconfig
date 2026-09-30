@@ -1,0 +1,48 @@
+# LIHAObohuan 宠物环 应用配置
+
+config APP_POWER_DOMAIN_SELFTEST
+	bool "Boot-time power domain self-test"
+	default y
+	help
+	  开机自检阶段依次单独打开/关闭三路电源域（SENS/STORE/ANALOG）
+	  并回读校验，通过 RTT 打印 PASS/FAIL，用于验证三域独立控制。
+	  量产固件可关闭以缩短开机时间。
+
+config APP_BOOT_LED_INDICATION
+	bool "Boot/ready LED indication (3 s patterns)"
+	default y
+	help
+	  开机 LED0(红) 闪烁 3 秒、就绪 LED0+LED1 同闪 3 秒的开机灯效。
+	  关闭后跳过灯效直接进入主循环（关机蓝闪不受此开关影响）。
+
+config APP_SHUTDOWN_HOLD_MS
+	int "Power-off hold time (ms)"
+	default 3000
+	range 1000 9000
+	help
+	  关机判定时长：按住达到该时长后松开才触发优雅关机
+	  （防佩戴误触，产品方案 §5.2）。
+
+config APP_SHORT_PRESS_MAX_MS
+	int "Short-press upper bound (ms)"
+	default 1000
+	range 100 2000
+	help
+	  松开时按住时长小于该值视为短按（状态确认，蓝灯双闪）。
+
+config APP_LED_BLINK_PERIOD_MS
+	int "LED blink half period (ms)"
+	default 300
+	range 50 1000
+	help
+	  3 秒指示图案的亮/灭半周期（默认 300 ms on / 300 ms off）。
+
+config APP_LED_INDICATION_MS
+	int "LED indication duration (ms)"
+	default 3000
+	range 500 10000
+	help
+	  开机/关机/就绪指示图案的持续时长（默认 3 秒）。
+
+# 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
+source "Kconfig.zephyr"

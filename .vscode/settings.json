@@ -1,0 +1,12 @@
+{
+    "nrf-connect.applications": [
+        "${workspaceFolder}"
+    ],
+    "nrf-connect.topdir": "C:\\ncs\\v3.4.0",
+    "nrf-connect.toolchainPath": "C:\\ncs\\toolchains\\dcbdc366a1",
+    "files.associations": {
+        "*.overlay": "dts",
+        "*.dtsi": "dts",
+        "*.conf": "ini"
+    }
+}

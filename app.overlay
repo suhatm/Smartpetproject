@@ -1,0 +1,89 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+/*
+ * LIHAObohuan 宠物环主板（fubenxiangmu）电源/开关机/LED 设备树
+ *
+ * 关键硬件连接（对齐《元器件引脚及功能模块对应表》）：
+ *   P1.07 <-> nPM1300 SDA   (PMIC_TWI = i2c22)
+ *   P1.08 ->  nPM1300 SCL
+ *   P0.03 <-  nPM1300 GPIO1 / PMIC_IRQ_N（R24 47k 外部上拉）
+ *   P1.06 ->  TPS7A2030 EN / ANA_EN（注意：EVT0 为 P1.05，本板改 P1.06）
+ */
+
+/ {
+	zephyr,user {
+		/* 模拟电源域使能：TPS7A2030 EN，高有效，R25 100k 下拉默认关 */
+		ana-enable-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * P1.02/P1.03 复位后默认 NFC 功能；后续用作 SENS_I2C，
+ * 先在 UICR 中归还为 GPIO（当前电源 UI 暂不启用 i2c21）。
+ */
+&uicr {
+	nfct-pins-as-gpios;
+};
+
+/*
+ * 关键：禁用 uart20（uart20 冲突规避，双保险之二）。
+ * DK 板级 pinctrl 为 uart20 预定义了 TX=P1.04/RX=P1.05/RTS=P1.06/CTS=P1.07，
+ * 与本板 IMU_REF_INT2/ADC_HEART/ANA_EN/PMIC_TWI_SDA 四脚全部冲突。
+ */
+&uart20 {
+	status = "disabled";
+};
+
+&pinctrl {
+	pet_pmic_i2c22_default: pet_pmic_i2c22_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 7)>,
+				<NRF_PSEL(TWIM_SCL, 1, 8)>;
+		};
+	};
+
+	pet_pmic_i2c22_sleep: pet_pmic_i2c22_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 7)>,
+				<NRF_PSEL(TWIM_SCL, 1, 8)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c22 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&pet_pmic_i2c22_default>;
+	pinctrl-1 = <&pet_pmic_i2c22_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	npm1300_pmic: pmic@6b {
+		compatible = "nordic,npm1300";
+		reg = <0x6b>;
+		status = "okay";
+
+		/* nPM1300 GPOIRQ：空闲低电平，中断挂起期间为高 */
+		host-int-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		pmic-int-pin = <1>;
+
+		/* 从 Ship 模式唤醒需长按约 0.6 s */
+		ship-to-active-time-ms = <608>;
+
+		/* 保留 nPM1300 10 s 长按应急 power-cycle 复位 */
+		long-press-reset = "one-button";
+	};
+};
+
+&lfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <9000>;
+};
+
+&hfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <8000>;
+};

@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(smartpetring_power_ui)
+
+target_sources(app PRIVATE
+    src/app/main.c
+    src/hardware/power_control.c
+    src/hardware/status_led.c
+)
+
+target_include_directories(app PRIVATE
+    src/hardware
+)

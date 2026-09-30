@@ -1,2 +1,6 @@
 # WorkBuddy 本地数据（AI 助手项目记忆，不入库）
 .workbuddy/
+
+# 构建产物与日志
+build/
+build_log.txt
