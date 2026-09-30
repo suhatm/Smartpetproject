@@ -84,3 +84,13 @@ nrfutil device reset
 - [ ] 充电中（VBUS 在位）长按关机：应挂起关机（`ship_deferred=1`），拔线后真正进 Ship；
 - [ ] 充电监护模式 LED 指示（红 1s 周期闪）。
 
+## 6. 心跳指示固件验证（2026-09-30，commit 4395986）
+
+- 新增 `CONFIG_APP_HEARTBEAT_LED`（默认开）：ACTIVE 期间每 5s 双灯同亮 100ms；
+  配套 `可配置项.txt` 汇总全部 7 个可配置项。
+- 烧录 + RTT 验证通过：`LED_PATTERN,heartbeat=both_flash_100ms_every_5000ms`、
+  SELFTEST PASS、无 FAULT、主循环静默运行。
+- 构建注意：本 SDK 复用 build 目录增量编译会触发 nrf_security 模块 Kconfig
+  malformed 报错（CONFIG_MBEDTLS_CONFIG_FILE 空 cache 变量被回喂 Kconfig），
+  需 `west build --pristine` 全量重建。
+
