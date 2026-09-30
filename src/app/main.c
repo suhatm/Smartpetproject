@@ -47,6 +47,10 @@
 #define INDICATION_MS      CONFIG_APP_LED_INDICATION_MS
 /** 指示图案闪烁半周期（ms）：300 on / 300 off */
 #define BLINK_HALF_MS      CONFIG_APP_LED_BLINK_PERIOD_MS
+/** 心跳指示周期（ms）：正常工作期间每该时长双灯快闪一次 */
+#define HEARTBEAT_PERIOD_MS CONFIG_APP_HEARTBEAT_PERIOD_MS
+/** 心跳单次点亮时长（ms） */
+#define HEARTBEAT_FLASH_MS  CONFIG_APP_HEARTBEAT_FLASH_MS
 /** 电源域开关后等待生效时间（ms） */
 #define DOMAIN_SETTLE_MS   20U
 
@@ -355,7 +359,8 @@ static void handle_events(int64_t now_ms)
  *  - 按键按住 >=3s：红蓝同亮，提示"松手即关机"；
  *  - 按键按住 1~3s：红灯常亮，提示关机武装中；
  *  - CHARGE_ONLY：红灯 1s 周期闪烁（表示 USB 供电，非充电电流证明）；
- *  - ACTIVE：无周期图案（3 秒就绪确认在启动时一次性播完，省电）。
+ *  - ACTIVE：心跳指示——每 APP_HEARTBEAT_PERIOD_MS 双灯同亮
+ *    APP_HEARTBEAT_FLASH_MS（默认 5s/100ms，可关，见《可配置项.txt》）。
  *
  * @return 0 成功；负值 LED 驱动失败
  */
@@ -384,9 +389,17 @@ static int update_led_pattern(int64_t now_ms)
 		/* 注意：只表示 USB/仅充电模式，不代表实际充电电流 */
 		red = ((uint32_t)now_ms % 1000U) < 500U;
 	} else {
-		/* ACTIVE：无周期图案，静默运行 */
+#if CONFIG_APP_HEARTBEAT_LED
+		/* ACTIVE：心跳指示——每 HEARTBEAT_PERIOD_MS 双灯同亮 HEARTBEAT_FLASH_MS */
+		uint32_t beat = (uint32_t)now_ms % HEARTBEAT_PERIOD_MS;
+
+		red = beat < HEARTBEAT_FLASH_MS;
+		blue = red;
+#else
+		/* ACTIVE：无周期图案，静默运行（最省电） */
 		red = false;
 		blue = false;
+#endif
 	}
 
 	return status_led_set(red, blue);
@@ -477,6 +490,10 @@ int main(void)
 	printk("LED_MAP,red=nPM1300_LED0,blue=nPM1300_LED1\n");
 	printk("LED_PATTERN,boot=red_blink_3s,ready=both_blink_3s,"
 	       "shutdown=blue_blink_3s\n");
+#if CONFIG_APP_HEARTBEAT_LED
+	printk("LED_PATTERN,heartbeat=both_flash_%ums_every_%ums\n",
+	       HEARTBEAT_FLASH_MS, HEARTBEAT_PERIOD_MS);
+#endif
 	printk("BUTTON_UI,short=status_ack,hold_1s=arming_red,"
 	       "hold_3s=release_to_ship_red_blue\n");
 

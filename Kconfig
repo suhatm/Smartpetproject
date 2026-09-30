@@ -44,5 +44,31 @@ config APP_LED_INDICATION_MS
 	help
 	  开机/关机/就绪指示图案的持续时长（默认 3 秒）。
 
+config APP_HEARTBEAT_LED
+	bool "Heartbeat LED indication during normal operation"
+	default y
+	help
+	  正常工作（ACTIVE）期间的心跳指示：LED0+LED1 同时快闪一下，
+	  周期与时长可配（APP_HEARTBEAT_PERIOD_MS / APP_HEARTBEAT_FLASH_MS）。
+	  用于"设备正在工作"的持续可见指示；关闭后正常工作期间灯全灭
+	  （最省电）。注意：心跳指示与省电存在权衡，默认开启满足
+	  "正常工作可见"的产品需求，量产可按需关闭。
+
+config APP_HEARTBEAT_PERIOD_MS
+	int "Heartbeat period (ms)"
+	default 5000
+	range 1000 60000
+	depends on APP_HEARTBEAT_LED
+	help
+	  心跳指示的重复周期（默认每 5 秒闪一次）。
+
+config APP_HEARTBEAT_FLASH_MS
+	int "Heartbeat flash duration (ms)"
+	default 100
+	range 20 500
+	depends on APP_HEARTBEAT_LED
+	help
+	  心跳单次闪烁的点亮时长（默认 100 ms，双灯同亮）。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"
