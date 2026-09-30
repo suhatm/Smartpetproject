@@ -3,18 +3,25 @@
  * @brief SWD 测试邮箱：上位机经调试器直接读写 RAM 邮箱下发电源域命令
  *
  * 背景：本板 uart20 因引脚冲突禁用、无 USB CDC，上位机与固件的唯一
- * 通信通道是 SWD。协议采用"共享内存邮箱"：
+ * 通信通道是 SWD。协议采用共享内存邮箱：
  *
  *  - 固件启动时初始化邮箱（写入魔数），主循环每 20ms 轮询一次；
  *  - 上位机（tools/power_domain_test.py，经 nrfutil device read/write）
- *    按顺序写 cmd -> seq -> status=1（status 最后写，作为触发）；
- *  - 固件看到 status==1 后执行命令，回填 result（三域状态位图）与
- *    rc（返回码），最后写 status=2 表示完成；
- *  - 上位机轮询 status==2 即取走结果。
+ *    每条命令只做 2 次 nrfutil 调用（协议 v2，性能关键）：
+ *      ① 向 mb+0x04 写入一个"打包触发字"（cmd/seq/相位合一个 32 位字，
+ *         单次原子写即触发命令）；
+ *      ② 回读 mb+0x04 起的 5 个字，校验相位=DONE 且 seq 匹配即取结果。
+ *  - 固件看到相位=PENDING 后执行命令，回填 result（三域状态位图）与
+ *    rc（返回码），最后把触发字相位改写为 DONE。
+ *
+ *  协议 v1（cmd/seq/status 分三个字写，每命令 5 次 nrfutil 调用）已废弃：
+ *  每次 nrfutil 调用都要重启进程 + 探针连接握手约 1s，v1 单命令耗时
+ *  5s+；v2 降到 2 次调用约 2s。
  *
  * 邮箱地址在链接期固定，可从 build/zephyr/zephyr.map 中解析
  * 符号 power_test_mb 获得；固件启动时也会通过 RTT 打印该地址。
  */
+
 #ifndef TEST_MAILBOX_H
 #define TEST_MAILBOX_H
 
@@ -23,7 +30,7 @@
 /** 邮箱魔数："PRT3"（Power Rail Test v3），固件启动时写入 */
 #define POWER_TEST_MB_MAGIC 0x50525433UL
 
-/** 上位机命令集（写 mb.cmd） */
+/** 上位机命令集（触发字 bits[7:0]） */
 enum power_test_cmd {
 	TEST_MB_CMD_NONE = 0,  /**< 空命令 */
 	TEST_MB_CMD_SENS_ON = 1,  /**< 打开 VDD_SENS_3V0 */
@@ -37,10 +44,10 @@ enum power_test_cmd {
 	TEST_MB_CMD_STATUS = 9,  /**< 仅查询三域状态 */
 };
 
-/** 命令状态机（mb.status） */
-#define TEST_MB_STATUS_IDLE    0U /**< 空闲，等待上位机命令 */
-#define TEST_MB_STATUS_PENDING 1U /**< 上位机已写入命令，待执行 */
-#define TEST_MB_STATUS_DONE    2U /**< 固件已执行完毕，结果有效 */
+/** 触发字相位（bits[31:16]）：固件据此判断命令待执行/已完成 */
+#define TEST_MB_PHASE_IDLE    0x0000U /**< 空闲（触发字=0） */
+#define TEST_MB_PHASE_PENDING 0x0001U /**< 上位机已触发，待执行 */
+#define TEST_MB_PHASE_DONE    0x0002U /**< 固件已执行完毕，结果有效 */
 
 /** mb.result 三域状态位 */
 #define TEST_MB_RESULT_SENS  0x01U /**< bit0: VDD_SENS_3V0 导通 */
@@ -52,17 +59,19 @@ enum power_test_cmd {
  *
  * 字段布局（小端 32 位字，上位机按 4 字节对齐访问）：
  *  +0x00 magic   魔数，固件启动时写 0x50525433
- *  +0x04 cmd     命令码（上位机写）
- *  +0x08 seq     命令序号，每条命令递增（上位机写）
- *  +0x0C status  0=空闲 1=待执行 2=完成（触发位，上位机最后写）
+ *  +0x04 trig    打包触发字（协议 v2）：bits[7:0]=cmd，[15:8]=seq（8 位
+ *                循环计数），[31:16]=相位（0 空闲/1 待执行/2 完成）。
+ *                上位机单写此字即触发命令；固件完成后原地改写相位为 DONE
+ *  +0x08 rsvd0   预留（协议 v1 的 seq 字段，v2 不用，保持布局稳定）
+ *  +0x0C rsvd1   预留（协议 v1 的 status 字段，v2 不用，保持布局稳定）
  *  +0x10 result  三域状态位图（固件回填）
  *  +0x14 rc      执行返回码，0 成功（固件回填）
  */
 struct power_test_mb {
 	volatile uint32_t magic;
-	volatile uint32_t cmd;
-	volatile uint32_t seq;
-	volatile uint32_t status;
+	volatile uint32_t trig;
+	volatile uint32_t rsvd0;
+	volatile uint32_t rsvd1;
 	volatile uint32_t result;
 	volatile uint32_t rc;
 };

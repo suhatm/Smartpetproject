@@ -19,8 +19,10 @@
     1. J-Link 已接好（USB 到电脑 + 4 线到板子），板子已上电运行固件；
     2. build/zephyr/zephyr.map 存在（编译产物，用于解析邮箱地址）。
 
-协议见 src/app/test_mailbox.h：上位机写 cmd -> seq -> status=1（最后写，
-作为触发），固件执行后回填 result/rc 并写 status=2。
+协议见 src/app/test_mailbox.h（协议 v2）：上位机单写一个 32 位"打包触发字"
+（mb+0x04：bits[7:0]=cmd，[15:8]=seq，[31:16]=相位 0x0001 触发），
+固件执行后回填 result/rc 并把触发字相位改写为 0x0002（DONE），
+上位机回读 5 字校验相位与 seq 即取结果——每命令仅 2 次 nrfutil 调用。
 """
 
 import argparse
@@ -42,10 +44,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAP_FILE = os.path.join(PROJECT_ROOT, "build", "zephyr", "zephyr.map")
 
 MB_MAGIC = 0x50525433          # "PRT3"
-MB_WORDS = 6                   # magic/cmd/seq/status/result/rc
+MB_WORDS = 6                   # magic/trig/rsvd0/rsvd1/result/rc
 MB_SIZE = MB_WORDS * 4
 
-STATUS_IDLE, STATUS_PENDING, STATUS_DONE = 0, 1, 2
+TRIG_PENDING = 0x00010000      # 触发字相位：待执行
+TRIG_DONE = 0x00020000         # 触发字相位：完成（结果有效）
 
 RESULT_SENS, RESULT_STORE, RESULT_ANA = 0x01, 0x02, 0x04
 
@@ -149,8 +152,8 @@ class Mailbox:
 
     def read(self):
         w = read_words(self.addr, MB_WORDS)
-        return {"magic": w[0], "cmd": w[1], "seq": w[2],
-                "status": w[3], "result": w[4], "rc": w[5]}
+        return {"magic": w[0], "trig": w[1],
+                "result": w[4], "rc": w[5]}
 
     def check(self):
         mb = self.read()
@@ -159,22 +162,32 @@ class Mailbox:
                                f"（期望 0x{MB_MAGIC:08X}）\n"
                                f"可能固件未运行或版本不含测试邮箱")
         if self.seq is None:
-            self.seq = mb["seq"]
+            # 从触发字同步 seq 基准（上次命令的 8 位序号）
+            self.seq = (mb["trig"] >> 8) & 0xFF
         return mb
 
     def send(self, cmd):
-        """下发命令并等待固件执行完成，返回最终邮箱内容。"""
-        self.check()
-        self.seq = (self.seq + 1) & 0xFFFFFFFF
-        write_word(self.addr + 0x04, cmd)      # cmd
-        write_word(self.addr + 0x08, self.seq) # seq
-        write_word(self.addr + 0x0C, STATUS_PENDING)  # status=1（触发）
+        """下发命令并等待固件执行完成，返回最终结果。
+
+        协议 v2：1 次 nrfutil 写（打包触发字）+ 1 次 nrfutil 读（结果），
+        相比 v1（5 次调用，约 5s）降到约 2s。
+        """
+        if self.seq is None:
+            self.check()
+        self.seq = (self.seq + 1) & 0xFF
+        if self.seq == 0:
+            self.seq = 1
+        seq = self.seq
+
+        # 单写打包触发字：相位=PENDING | seq<<8 | cmd（原子触发）
+        write_word(self.addr + 0x04, TRIG_PENDING | (seq << 8) | (cmd & 0xFF))
 
         deadline = time.time() + CMD_TIMEOUT_S
         while time.time() < deadline:
-            mb = self.read()
-            if mb["status"] == STATUS_DONE and mb["seq"] == self.seq:
-                return mb
+            w = read_words(self.addr + 0x04, 5)  # trig/rsvd/rsvd/result/rc
+            if ((w[0] & 0xFFFF0000) == TRIG_DONE
+                    and ((w[0] >> 8) & 0xFF) == seq):
+                return {"trig": w[0], "seq": seq, "result": w[3], "rc": w[4]}
             time.sleep(POLL_INTERVAL_S)
         raise RuntimeError(f"命令 {cmd} 超时（固件 {CMD_TIMEOUT_S}s 未应答）。"
                            f"请确认板子在运行、J-Link 连接正常")

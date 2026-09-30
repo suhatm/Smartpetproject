@@ -111,13 +111,13 @@ static void execute_command(uint32_t cmd, uint32_t *result, int *rc)
 void test_mailbox_init(void)
 {
 	power_test_mb.magic = POWER_TEST_MB_MAGIC;
-	power_test_mb.cmd = TEST_MB_CMD_NONE;
-	power_test_mb.seq = 0U;
-	power_test_mb.status = TEST_MB_STATUS_IDLE;
+	power_test_mb.trig = (TEST_MB_PHASE_IDLE << 16);
+	power_test_mb.rsvd0 = 0U;
+	power_test_mb.rsvd1 = 0U;
 	power_test_mb.result = 0U;
 	power_test_mb.rc = 0;
 
-	printk("TESTMB,mailbox=0x%08x,protocol=swd_mailbox_v1\n",
+	printk("TESTMB,mailbox=0x%08x,protocol=swd_mailbox_v2\n",
 	       (uint32_t)(uintptr_t)&power_test_mb);
 }
 
@@ -129,12 +129,13 @@ void test_mailbox_poll(void)
 		return;
 	}
 
-	if (power_test_mb.status != TEST_MB_STATUS_PENDING) {
+	uint32_t trig = power_test_mb.trig;
+	if ((trig >> 16) != TEST_MB_PHASE_PENDING) {
 		return;
 	}
 
-	uint32_t cmd = power_test_mb.cmd;
-	uint32_t seq = power_test_mb.seq;
+	uint32_t cmd = trig & 0xFFU;
+	uint32_t seq = (trig >> 8) & 0xFFU;
 	uint32_t result = 0U;
 	int rc = 0;
 
@@ -143,7 +144,8 @@ void test_mailbox_poll(void)
 	printk("TESTMB,cmd=%u,seq=%u,rc=%d,result=0x%02x\n",
 	       cmd, seq, rc, result);
 
+	/* 先回填结果，最后原子改写触发字相位为 DONE（上位机取结果的标志） */
 	power_test_mb.result = result;
 	power_test_mb.rc = (uint32_t)rc;
-	power_test_mb.status = TEST_MB_STATUS_DONE;
+	power_test_mb.trig = (TEST_MB_PHASE_DONE << 16) | (seq << 8) | cmd;
 }
