@@ -48,6 +48,18 @@
    取值：y / n；默认 y。
    注意：量产固件建议置 n，缩短开机时间约 0.15s。
 
+8. CONFIG_APP_POWER_DOMAIN_TEST_MB   【可选项·默认开 y】（task-V1.01 新增）
+   名称：SWD 电源域测试邮箱
+   作用：上位机 tools/power_domain_test.py 经调试器（nrfutil）读写
+         RAM 邮箱（符号 power_test_mb，地址见 build/zephyr/zephyr.map），
+         下发三电源域独立开关命令：
+           on/off sens|store|ana  —— 单域独立开关
+           on/off all             —— 三域全开/全关
+           status                 —— 查询三域状态
+           cycle                  —— 自动化独立性测试（逐域开关+全开全关）
+   取值：y / n；默认 y。
+   注意：仅调试用（依赖 J-Link SWD 访问），量产固件必须置 n。
+
 使用示例（prj.conf）：
 --------------------------------------------------------------
 # 关闭心跳指示（最省电）
@@ -57,7 +69,12 @@ CONFIG_APP_HEARTBEAT_PERIOD_MS=10000
 CONFIG_APP_HEARTBEAT_FLASH_MS=50
 # 关机改为长按 5 秒
 CONFIG_APP_SHUTDOWN_HOLD_MS=5000
+# 量产固件关闭调试用测试邮箱
+CONFIG_APP_POWER_DOMAIN_TEST_MB=n
 
 变更记录：
 --------------------------------------------------------------
 2026-09-30  新增心跳指示 APP_HEARTBEAT_LED（默认开）及本文档。
+2026-09-30  task-V1.01 新增 SWD 电源域测试邮箱
+            APP_POWER_DOMAIN_TEST_MB（默认开，量产须关）及上位机
+            tools/power_domain_test.py。

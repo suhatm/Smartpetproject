@@ -70,5 +70,14 @@ config APP_HEARTBEAT_FLASH_MS
 	help
 	  心跳单次闪烁的点亮时长（默认 100 ms，双灯同亮）。
 
+config APP_POWER_DOMAIN_TEST_MB
+	bool "SWD test mailbox for power domain control (host tool)"
+	default y
+	help
+	  SWD 测试邮箱：上位机（tools/power_domain_test.py）经调试器
+	  直接读写 RAM 邮箱（符号 power_test_mb，地址见 zephyr.map），
+	  下发三电源域独立开关命令（SENS/STORE/ANA 单独开、关、
+	  全开、全关、状态查询）。仅调试用，量产固件应关闭。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"

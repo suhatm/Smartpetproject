@@ -33,6 +33,9 @@
 
 #include "power_control.h"
 #include "status_led.h"
+#if CONFIG_APP_POWER_DOMAIN_TEST_MB
+#include "test_mailbox.h"
+#endif
 
 /** nPM1300 PMIC 的设备树节点 */
 #define PMIC_NODE DT_NODELABEL(npm1300_pmic)
@@ -441,6 +444,12 @@ int main(void)
 		return ret;
 	}
 
+#if CONFIG_APP_POWER_DOMAIN_TEST_MB
+	/* 2.5 SWD 测试邮箱：上位机（tools/power_domain_test.py）经调试器
+	 * 直接读写 RAM 邮箱下发三电源域独立开关命令 */
+	test_mailbox_init();
+#endif
+
 #if CONFIG_APP_BOOT_LED_INDICATION
 	/* 3. 开机指示：LED0（红）闪烁 3 秒 */
 	ret = status_led_blink(true, false, INDICATION_MS,
@@ -506,6 +515,9 @@ int main(void)
 		if ((ret != 0) && (app_state != APP_STATE_FAULT)) {
 			enter_fault("led_update", ret);
 		}
+#if CONFIG_APP_POWER_DOMAIN_TEST_MB
+		test_mailbox_poll();            /* SWD 测试邮箱命令 */
+#endif
 		k_sleep(K_MSEC(LOOP_PERIOD_MS));
 	}
 }
