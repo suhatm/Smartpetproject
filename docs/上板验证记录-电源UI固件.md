@@ -117,3 +117,24 @@ nrfutil device reset
 已知硬件事实补充：LED2（蓝）实板验证可正常点亮（关机蓝闪、短按确认均可见），
 原理图网表层面的"极性接反"判断对实物不成立（符号库 pin 定义差异所致）。
 
+## 8. 三电源域 SWD 邮箱测试（2026-09-30，task-V1.01，commit 14d5d8e）
+
+通信方案：uart20 禁用（引脚冲突）、无 USB CDC → 采用 **SWD 共享内存邮箱**：
+固件轮询 RAM 固定地址的 `power_test_mb` 结构（.noinit 段，map 符号解析地址），
+Python 上位机 `tools/power_domain_test.py` 经 nrfutil device read/write 读写邮箱。
+
+命令集：`on/off sens|store|ana|all`（单域独立/全开/全关）、`status`（查询）、
+`cycle`（自动化独立性测试）。Kconfig：`APP_POWER_DOMAIN_TEST_MB`（默认开，
+量产须关）。
+
+自动化测试结果（16/16 PASS）：
+- 全关基准 → 逐域单独开/关（SENS/STORE/ANALOG 互不影响）
+- 全开 → 全开中逐域单独关 → 恢复 → 全关收尾
+- 回读校验：LDSW1/LDSW2 状态位 + ANA_EN GPIO 电平，rc 全 OK
+
+调试中修复：邮箱命令执行后需 20ms settle 再回读 LDSW 状态位
+（软启动时延，首轮测试 SENS/STORE 显示 off 的根因）；
+上位机 nrfutil 读写增加 3 次自动重试（偶发 worker 超时）。
+
+资源占用：FLASH 2.52% / RAM 4.80%（含测试邮箱）。
+
