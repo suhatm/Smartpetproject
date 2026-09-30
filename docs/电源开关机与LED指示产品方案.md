@@ -94,7 +94,7 @@ Active ──VBUS插入──▶ 充电监护（可继续运行，不强制关�
 要点：
 1. **进 Ship 由主机写任务寄存器触发**（BASE 0x0B, offset 0x02, 写 1），写成功后 VSYS 立即切断，SoC 掉电，代码不应再执行（1 s 后仍存活视为故障——沿用 petChoker 判据）。
 2. **VBUS 在位时 Ship 请求挂起**：两次间隔 150 ms 采样确认 VBUS 不在位才执行（防刚拔线误判；也避免充电中强制断电）。
-3. **Hibernate 需寄存器级实现**：NCS v3.4.0 的 `mfd_npm1300` 未封装 hibernate API，需按 datasheet 写 SHIP 模块对应任务寄存器，并预先使能 Buck/LDSW 的 active discharge（DevZone 实测：不使能放电则进 hibernate 后输出电容残余电压、约 10 s 后被内部定时器复位唤醒）。
+3. **Hibernate 实现修正（2026-09-30 固件开发时确认）**：本机 NCS v3.4.0（Zephyr 4.4.0）的 `mfd_npm13xx` 驱动**原生提供** `mfd_npm13xx_hibernate(dev, time_ms)`，无需寄存器级手写；但 DevZone 实测注意事项仍然成立：进 Hibernate 前需使能 Buck/LDSW 的 active discharge，且会被内部定时器唤醒（timed hibernate）。另注意本 SDK 中 nPM1300 归并到 npm13xx 驱动族：Kconfig 符号为 `CONFIG_MFD_NPM13XX`（无 `MFD_NPM1300`），API 为 `mfd_npm13xx_reg_read/write()`、事件枚举 `NPM13XX_EVENT_*`（petChoker 源码是旧版 SDK 命名，不能直接照抄）。
 
 ---
 
@@ -218,9 +218,19 @@ LED0=红（充电/开机域）、LED1=蓝（状态/关机域），经 LEDDRV 主
 
 ### 7.3 本期范围外（预留）
 
-- Hibernate 模式寄存器级实现（定时自唤醒场景）；
+- Hibernate 模式使能（SDK 已有 `mfd_npm13xx_hibernate()`，接入即可，见 §3 要点 3）；
 - 充电状态细分指示（充满/故障灯效）；
 - Buck PWM 锁定（RF 窗口降噪）。
+
+### 7.4 固件实现状态（2026-09-30，commit e95ffb0）
+
+基础固件已落地并编译通过（`west build` 无错误；唯一告警 `NRF_PLATFORM_LUMOS deprecated` 来自 DK 板级 defconfig，非应用引入）：
+- `prj.conf` / `Kconfig`（APP_POWER_DOMAIN_SELFTEST 等开关）/ `app.overlay`（uart20 disabled、ANA_EN=gpio1.6、PMIC@i2c22@6b）
+- `src/hardware/power_control.c`：三域独立开关 + 全关校验 + VBUS 双采样 + 进 Ship
+- `src/hardware/status_led.c`：LEDDRV 主机模式 + set/pulse/blink 三类图案 API
+- `src/app/main.c`：§5 状态机全量实现（开机红闪 3s → 自检 → 双闪 3s → 主循环；长按 3s 松开 → 关域 → 蓝闪 3s → 进 Ship；充电中挂起）
+- 资源占用：FLASH 2.49% / RAM 4.79%
+- **待上板验证项**：烧录 + RTT 日志确认状态机行为、三域独立控制、LED2 蓝灯（依赖极性整改）
 
 ---
 
