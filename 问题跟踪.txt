@@ -108,6 +108,9 @@
      HDSC-JLinkDevices.xml.bak-20260930）；
   2) GUI 重构线程模型：全部 nrfutil 调用只在后台线程执行，UI 更新经
      queue 投递回主线程 100ms ticker，主线程零阻塞。
-验证：GUI 重启后 20s 无弹窗、无 JLinkGUIServer 进程、无报错日志。
+验证：
+  - GUI 重启后 20s 无弹窗、无 JLinkGUIServer 进程、无报错日志；
+  - 连续运行稳定性实测（2026-09-30）：GUI 连续运行约 5 分钟正常关闭退出，
+    gui_log.txt 全程无异常输出、无崩溃堆栈——线程模型修复在实际使用中稳定有效。
 
 【问题 #007】（预留编号）
