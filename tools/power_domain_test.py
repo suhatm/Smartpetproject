@@ -109,9 +109,14 @@ def read_words(addr, n):
 
 
 def write_word(addr, value):
-    """写单个 32 位字（十进制传值，nrfutil 兼容性最好）。"""
+    """写单个 32 位字（十进制传值，nrfutil 兼容性最好）。
+
+    注意必须带 --family：否则 J-Link DLL 会弹设备选择对话框
+    （GUIServer 模态框，曾默认指向损坏的 TLE9863QXW20 条目）。
+    """
     run_nrfutil(["device", "write", "--address", hex(addr),
-                 "--value", str(value & 0xFFFFFFFF), "--direct"])
+                 "--value", str(value & 0xFFFFFFFF),
+                 "--direct", "--family", "nrf54l"])
 
 
 def find_mailbox_addr():

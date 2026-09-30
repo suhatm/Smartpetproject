@@ -11,9 +11,16 @@
 build/zephyr/zephyr.map 存在（自动解析邮箱地址）。
 
 启动：python tools/power_domain_gui.py
+
+线程模型（重要——v2 修复了 UI 冻结）：
+  - 所有 nrfutil 调用（SWD 读/写，单次可达数秒）只在后台线程执行；
+  - 后台线程通过 ui_queue 把"待执行的 UI 更新"投递回主线程；
+  - 主线程只有一个 100ms 的队列消费 ticker，绝不阻塞；
+  - cmd_lock 串行化全部 SWD 访问（轮询与命令互斥）。
 """
 
 import os
+import queue
 import sys
 import threading
 import time
@@ -40,18 +47,19 @@ COLOR_OFF = "#9e9e9e"      # 域关闭指示（灰=断电）
 
 
 class PowerGui:
-    """主应用类：界面 + 后台 SWD 操作线程"""
+    """主应用类：界面 + 后台 SWD 操作线程 + 队列式 UI 更新"""
 
     def __init__(self, root):
         self.root = root
         self.mb = None
-        self.poll_on = True
+        self.poll_on = tk.BooleanVar(value=True)
         self.cmd_lock = threading.Lock()   # 串行化所有 SWD 访问
-        self.log_queue = []
+        self.ui_queue = queue.Queue()      # 后台线程 -> 主线程 的 UI 更新
         self.state_labels = {}
         self.state_dots = {}
         self._build_ui()
-        self.root.after(100, self._connect)
+        self.root.after(100, self._ui_ticker)     # 主线程唯一循环
+        self.root.after(200, self._connect)       # 后台线程连接
 
     # ------------------------------------------------------------ 界面
 
@@ -66,9 +74,8 @@ class PowerGui:
         self.conn_var = tk.StringVar(value="⏳ 正在连接（解析邮箱地址、校验魔数）…")
         ttk.Label(top, textvariable=self.conn_var, font=("Microsoft YaHei", 10, "bold")
                   ).pack(side=tk.LEFT)
-        self.poll_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="自动轮询状态", variable=self.poll_var,
-                        command=self._toggle_poll).pack(side=tk.RIGHT)
+        ttk.Checkbutton(top, text="自动轮询状态", variable=self.poll_on
+                        ).pack(side=tk.RIGHT)
 
         # 中部：三域卡片
         cards = ttk.Frame(self.root, padding=(8, 0))
@@ -114,17 +121,47 @@ class PowerGui:
                                               font=("Consolas", 9))
         self.log.pack(fill=tk.BOTH, expand=True)
 
-    def _log(self, msg):
-        ts = time.strftime("%H:%M:%S")
-        self.log_queue.append(f"[{ts}] {msg}")
-        self.root.after(50, self._flush_log)
+    # ------------------------------------------------------------ UI 队列
 
-    def _flush_log(self):
+    def _ui_ticker(self):
+        """主线程 100ms 周期：消费后台线程投递的 UI 更新。"""
+        try:
+            while True:
+                kind, payload = self.ui_queue.get_nowait()
+                if kind == "log":
+                    self._append_log(payload)
+                elif kind == "conn":
+                    self.conn_var.set(payload)
+                elif kind == "state":
+                    result, rc = payload
+                    self._apply_state(result, rc)
+                elif kind == "poll_again":
+                    if self.poll_on.get() and self.mb is not None:
+                        self.root.after(int(POLL_PERIOD_S * 1000),
+                                        self._spawn_poll)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._ui_ticker)
+
+    def _append_log(self, msg):
+        ts = time.strftime("%H:%M:%S")
         self.log.config(state=tk.NORMAL)
-        while self.log_queue:
-            self.log.insert(tk.END, self.log_queue.pop(0) + "\n")
-            self.log.see(tk.END)
+        self.log.insert(tk.END, f"[{ts}] {msg}\n")
+        self.log.see(tk.END)
         self.log.config(state=tk.DISABLED)
+
+    def _apply_state(self, result, rc):
+        for key, name, bit, _ in DOMAINS:
+            on = (result & bit) != 0
+            self.state_dots[key].config(
+                text="● ON " if on else "○ off",
+                fg=COLOR_ON if on else COLOR_OFF)
+        if rc not in (0, None):
+            self._append_log(f"警告：回读 rc={rc}")
+
+    def _log(self, msg):
+        """任意线程可调用的日志方法（经队列投递到主线程）。"""
+        self.ui_queue.put(("log", msg))
 
     # ------------------------------------------------------------ 连接
 
@@ -132,52 +169,35 @@ class PowerGui:
         def work():
             try:
                 mb = Mailbox()
-                addr_s = f"0x{mb.addr:08X}"
                 mb.check()
                 self.mb = mb
-                self._log(f"连接成功：邮箱地址 {addr_s}（zephyr.map 解析），魔数校验通过")
-                self.root.after(0, lambda: self.conn_var.set(
+                addr_s = f"0x{mb.addr:08X}"
+                self.ui_queue.put(("conn",
                     f"✅ 已连接  邮箱 {addr_s}  （{POLL_PERIOD_S:.0f}s 自动轮询）"))
-                self._poll_state()
+                self._log(f"连接成功：邮箱地址 {addr_s}（zephyr.map 解析），魔数校验通过")
+                self.ui_queue.put(("poll_again", None))
             except Exception as e:
                 self._log(f"连接失败：{e}")
-                self.root.after(0, lambda: self.conn_var.set("❌ 连接失败（见日志）"))
+                self.ui_queue.put(("conn", "❌ 连接失败（见日志）"))
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ 状态轮询
 
-    def _toggle_poll(self):
-        self.poll_on = self.poll_var.get()
-        self._log(f"自动轮询：{'开' if self.poll_on else '关'}")
-
     def _refresh_now(self):
-        self._poll_state()
+        if self.mb is not None:
+            self._spawn_poll()
 
-    def _poll_state(self):
-        """周期性读状态（后台线程），刷新三域指示灯。"""
-        if self.mb is None:
-            return
-        with self.cmd_lock:
-            try:
-                mb = self.mb.read()
-            except Exception as e:
-                self._log(f"状态读取失败：{e}")
-                mb = None
-        if mb is not None:
-            self._update_dots(mb["result"], mb["rc"])
-        if self.poll_on:
-            self.root.after(int(POLL_PERIOD_S * 1000), self._poll_state)
-
-    def _update_dots(self, result, rc):
-        for key, name, bit, _ in DOMAINS:
-            on = (result & bit) != 0
-            dot = self.state_dots[key]
-            def upd(d=dot, o=on):
-                d.config(text="● ON " if o else "○ off",
-                         fg=COLOR_ON if o else COLOR_OFF)
-            self.root.after(0, upd)
-        if rc != 0:
-            self._log(f"警告：rc={rc}")
+    def _spawn_poll(self):
+        """在后台线程做一次状态读取（绝不阻塞主线程）。"""
+        def work():
+            with self.cmd_lock:
+                try:
+                    mb = self.mb.read()
+                    self.ui_queue.put(("state", (mb["result"], mb["rc"])))
+                except Exception as e:
+                    self._log(f"状态读取失败：{e}")
+            self.ui_queue.put(("poll_again", None))  # 完成后再排下一次
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ 命令下发
 
@@ -201,12 +221,12 @@ class PowerGui:
                 except Exception as e:
                     self._log(f"{label} 失败：{e}")
                     return
-            self._update_dots(mb["result"], mb["rc"])
             state = " ".join(
                 f"{n}={'ON' if mb['result'] & b else 'off'}"
                 for _, n, b, _ in DOMAINS)
             ok = "OK" if mb["rc"] == 0 else f"ERR({mb['rc']})"
             self._log(f"{label} → {state}  rc={ok}")
+            self.ui_queue.put(("state", (mb["result"], mb["rc"])))
         threading.Thread(target=work, daemon=True).start()
 
     def _run_cycle(self):
@@ -224,7 +244,7 @@ class PowerGui:
                 ok = (mb_ret["result"] == mask_want) and (mb_ret["rc"] == 0)
                 if not ok:
                     failures += 1
-                self._update_dots(mb_ret["result"], mb_ret["rc"])
+                self.ui_queue.put(("state", (mb_ret["result"], mb_ret["rc"])))
                 self._log(f"[{'PASS' if ok else 'FAIL'}] {tag}  "
                           f"(rc={'OK' if mb_ret['rc'] == 0 else mb_ret['rc']})")
 
