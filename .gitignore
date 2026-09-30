@@ -4,3 +4,5 @@
 # 构建产物与日志
 build/
 build_log.txt
+push_log.txt
+build_log.txt
