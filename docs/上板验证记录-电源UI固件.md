@@ -55,12 +55,32 @@ nrfutil device reset
 
 **以后每次烧录新固件若发现 RTT 无输出，先清这个字再复位。**
 
-## 4. 待人工验证项（无法远程完成）
+## 4. 人工验证结果（2026-09-30 电池供电实测，全部通过 ✅）
 
-- [ ] 开机 LED0（红）闪 3s / 就绪双灯同闪 3s 的**目视**确认；
-- [ ] LED1（蓝）：已知极性接反（方案 §8.1），当前预期不亮，整改后复测；
-- [ ] SW1 短按（<1s）：蓝灯双闪状态确认；
-- [ ] SW1 按住 1~3s：红灯常亮（武装提示）；
-- [ ] SW1 按住 ≥3s 松开：关域 → 蓝闪 3s → 进 Ship（整机掉电）；
+- [x] 开机 LED0（红）闪 3s / 就绪双灯同闪 3s——目视确认（含 Ship 唤醒后的完整序列）；
+- [x] **LED1（蓝）实板可正常点亮**——关机蓝闪 3s 用户目视确认。原"极性接反"判断在实物上不成立
+  （网表/符号库分析与实物引脚存在差异，原理图层面建议仍保持整改提示，但实物无需返修）；
+- [x] SW1 短按（<1s）：蓝灯双闪状态确认；
+- [x] SW1 按住 1~3s：红灯常亮（武装提示）；
+- [x] SW1 按住 ≥3s 松开：关域 → 蓝闪 3s → 进 Ship 整机断电。客观证据：断电后 SWD 无法连接
+  目标（"Unable to recognize the device: Unknown device family"，探针在位但目标无电），
+  电池供电下 VBUS=0 无关机挂起路径，直接进 Ship；
+- [x] Ship 态长按唤醒开机（PMIC 硬件 ship-to-active）——唤醒成功，RTT 记录到完整 Boot 日志；
+- [x] （附带验证）PMIC 10s 应急 power-cycle：唤醒操作总时长超 10s 触发，RTT 记录到两次连续 Boot。
+
+### 4.1 本轮补充证据（RTT 日志，断电前读出）
+
+```text
+[Boot #1] *** Booting nRF Connect SDK v3.4.0 *** → BOOT,SMARTPET_POWER_UI,v1.0
+          → SELFTEST,domains=PASS → SYSTEM_STATE,mode=active,vbus=0
+[Boot #2] *** Booting nRF Connect SDK v3.4.0 *** → BOOT,SMARTPET_POWER_UI,v1.0
+          →（缓冲区满截断；两次 Boot 由超 10s 应急 power-cycle 间隔）
+```
+
+按键事件日志（press/release）因进 Ship 断电后 RAM 掉电无法回读，以用户目视确认为准。
+
+## 5. 剩余待验证项（需 USB 线）
+
 - [ ] 充电中（VBUS 在位）长按关机：应挂起关机（`ship_deferred=1`），拔线后真正进 Ship；
-- [ ] Ship 态长按 0.6s 唤醒开机（PMIC 硬件行为）。
+- [ ] 充电监护模式 LED 指示（红 1s 周期闪）。
+
