@@ -86,5 +86,28 @@
       nrfutil device write --address 0x20000470 --value 0 --direct
       然后 nrfutil device reset。
 
-================================================================================
-（以下空白区留给后续新增问题，格式保持一致：编号/状态/日期/现象/分析/措施）
+【问题 #006】GUI 上位机：J-Link V9.24a 错误弹窗（TLE9863QXW20）+ 窗口未响应
+--------------------------------------------------------------------------------
+状态：已修复（f0e3360 + 器件包清理 2026-09-30）
+发现日期：2026-09-30（GUI 首次使用时）
+现象：
+  - 测试时反复弹出 "J-Link V9.24a Error: Device TLE9863QXW20:
+    Flash bank 0x11000000: No loader specified"；
+  - GUI 窗口标题出现"(未响应)"。
+根因（两个独立问题）：
+  1) 弹窗：上位机 write 命令未带 --family 参数 → J-Link DLL 需要设备
+     信息 → GUIServer 弹设备选择框，默认指向器件包中的损坏条目——
+     %APPDATA%\SEGGER\JLinkDevices\HDSC-JLinkDevices.xml 注册了
+     TLE9863QXW20（Flash bank 0x11000000），但其 loader 文件
+     Devices/Infineon/TLE986x/TLE9863.FLM 不存在 → 每次连接必报错。
+  2) 冻结：GUI 状态轮询跑在 Tk 主线程（root.after 回调内做阻塞
+     subprocess 调用），单次 SWD 读可达数秒 → 主循环被卡住。
+修复：
+  1) write 命令统一加 --family nrf54l（显式指定器件族，DLL 不再弹框）；
+     并移除器件包中损坏的 TLE9863 条目（备份：
+     HDSC-JLinkDevices.xml.bak-20260930）；
+  2) GUI 重构线程模型：全部 nrfutil 调用只在后台线程执行，UI 更新经
+     queue 投递回主线程 100ms ticker，主线程零阻塞。
+验证：GUI 重启后 20s 无弹窗、无 JLinkGUIServer 进程、无报错日志。
+
+【问题 #007】（预留编号）
