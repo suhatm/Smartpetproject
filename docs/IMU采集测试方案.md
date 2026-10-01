@@ -115,3 +115,58 @@ IMU_TEST,summary,PASS,devices=2,failures=0
 - `prj.conf`：+SENSOR/LSM6DSV16X 驱动、trigger global-thread、BT MTU 247
 - `Kconfig`：+APP_BLE_IMU_STREAM；`CMakeLists.txt`：+两个新源文件
 - 板测第一步已 PASS（U4@0x6B，WHO_AM_I=0x70）
+
+## 6. 上板踩坑记录（2026-10-01 实测，两个都是"静默失败"）
+
+这两个坑的共同特征：**函数全部返回 0，日志看上去一切正常，就是没数据**。
+
+### 6.1 drdy 触发注册成功但零中断（`frames=0`）
+
+现象：日志有 `IMU_STREAM,started,src=trigger`，`start_rc=0`，但停止时
+`IMU_STREAM,stopped,frames=0`，手机上收不到任何包。
+
+原因：`sensor_trigger_set()` 的 `trig->chan` 传了 `SENSOR_CHAN_ALL`。
+驱动 `lsm6dsv16x_trigger_set()` 内部是：
+
+```c
+case SENSOR_TRIG_DATA_READY:
+    if (trig->chan == SENSOR_CHAN_ACCEL_XYZ) { handler_drdy_acc = handler; enable_xl_int(); }
+    else if (trig->chan == SENSOR_CHAN_GYRO_XYZ) { handler_drdy_gyr = handler; enable_g_int(); }
+    break;
+```
+
+`SENSOR_CHAN_ALL` 两个分支都不命中 → INT1 路由没开、handler 没挂，
+但函数照样 `return 0`。
+
+修法：`trig->chan = SENSOR_CHAN_ACCEL_XYZ`（accel/gyro 同 ODR，
+挂 accel 一个即可，`sensor_sample_fetch()` 一次读六轴）。
+另加 600ms 看门狗：触发模式启动后若一帧未入队，自动降级为 33ms 轮询
+（`IMU_STREAM,fallback,polling,reason=no_drdy`），防止走线问题导致静默无数据。
+
+### 6.2 CCC 描述符权限写错 → 手机订阅被拒绝（无 `IMU_BLE,ccc` 日志）
+
+现象：手机 nRF Connect 上 Notify 看起来"已使能"，但设备端日志里
+完全没有 `IMU_BLE,ccc`，Notify 一包不发。
+
+原因：`BT_GATT_CCC(_changed, _perm)` 的**第二个参数是权限位，不是 CCC 值**。
+写成 `BT_GATT_CCC(ccc_cfg_changed, BT_GATT_CCC_NOTIFY)` 时，
+`BT_GATT_CCC_NOTIFY`(0x0001) 恰好等于 `BT_GATT_PERM_READ`(0x01)，
+CCC 描述符变成**只读** → 手机写 CCC 被协议栈以
+`Write Not Permitted` 拒绝 → `ccc_cfg_changed` 永不回调。
+
+修法：`BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)`
+（对齐官方样例 `nrf/samples/bluetooth/peripheral_power_profiling`）。
+
+### 6.3 排查手法备忘：SWD 直读 RTT
+
+本机 J-Link 是克隆探针，Segger 工具链不可用（见用户级记忆），
+读日志走 nrfutil 直读 RAM：
+
+1. `.map` 里取 `_SEGGER_RTT` 地址（本次 `0x20001070`）
+2. 烧录后先 `nrfutil device write --address 0x20001070 --value 0 --direct`
+   再复位——清掉上一版固件遗留的 RTT 控制块，否则新固件日志静默
+3. 控制块布局：`acID[16] + MaxUp[4] + MaxDown[4] + aUp[0]`，
+   `aUp[0] = {sName, pBuffer, SizeOfBuffer, WrOff, RdOff}`（各 4B）
+4. 按 96B 分块 `nrfutil device read --bytes N --direct --family nrf54l`
+   读 pBuffer 区（一次读 128B 有时会截断，脚本要校验长度并重试）
+   脚本：`rtt_dump2.py`

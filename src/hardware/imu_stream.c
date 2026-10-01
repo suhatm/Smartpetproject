@@ -66,9 +66,17 @@ static struct {
 	.errors = 0,
 };
 
+/*
+ * 坑（2026-10-01 实测踩过）：chan 必须写具体通道。
+ * 驱动 lsm6dsv16x_trigger_set() 内部是
+ *     if (chan == SENSOR_CHAN_ACCEL_XYZ) {...} else if (chan == SENSOR_CHAN_GYRO_XYZ) {...}
+ * 传 SENSOR_CHAN_ALL 两个分支都不进，函数仍返回 0（假成功），
+ * 但 INT1 路由没开、handler 没挂 → 永远收不到中断（frames=0）。
+ * accel/gyro 同 ODR(30Hz)，只挂 accel 即可，sample_fetch 一次读六轴。
+ */
 static const struct sensor_trigger drdy_trig = {
 	.type = SENSOR_TRIG_DATA_READY,
-	.chan = SENSOR_CHAN_ALL,
+	.chan = SENSOR_CHAN_ACCEL_XYZ,
 };
 
 /** m/s²(micro) -> mg，int64 + 四舍五入 */
@@ -152,6 +160,43 @@ static void poll_work_handler(struct k_work *work)
 	sample_push();
 }
 
+/*
+ * 触发模式看门狗：注册触发成功 ≠ 中断真的来了（INT 走线虚焊 / 引脚复用
+ * 冲突都会导致"注册成功但零中断"）。启动后 TRIGGER_WATCHDOG_MS 内若一帧
+ * 未入队，自动降级为定时轮询，保证数据流不断。
+ */
+#define TRIGGER_WATCHDOG_MS 600
+
+static void wd_timer_handler(struct k_timer *timer);
+
+static K_TIMER_DEFINE(trigger_wd_timer, wd_timer_handler, NULL);
+
+static void start_polling_mode(void)
+{
+	k_timer_start(&poll_timer, K_MSEC(POLL_PERIOD_MS),
+		      K_MSEC(POLL_PERIOD_MS));
+	stream.src = IMU_STREAM_SRC_POLLING;
+	printk("IMU_STREAM,started,src=polling,period_ms=%d\n", POLL_PERIOD_MS);
+}
+
+static void wd_timer_handler(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	if (atomic_get(&stream.active) == 0 ||
+	    stream.src != IMU_STREAM_SRC_TRIGGER) {
+		return;
+	}
+	if (stream.frames > 0) {
+		return; /* 中断正常，无需降级 */
+	}
+
+	/* 摘掉触发，改轮询 */
+	(void)sensor_trigger_set(imu_dev, &drdy_trig, NULL);
+	start_polling_mode();
+	printk("IMU_STREAM,fallback,polling,reason=no_drdy\n");
+}
+
 int imu_stream_start(void)
 {
 	int ret;
@@ -198,13 +243,12 @@ int imu_stream_start(void)
 	if (ret == 0) {
 		stream.src = IMU_STREAM_SRC_TRIGGER;
 		printk("IMU_STREAM,started,src=trigger,odr=30Hz,fs=8g|2000dps\n");
+		/* 看门狗：600ms 内没帧就降级轮询 */
+		k_timer_start(&trigger_wd_timer, K_MSEC(TRIGGER_WATCHDOG_MS),
+			      K_NO_WAIT);
 	} else {
 		printk("IMU_STREAM,trigger_failed_rc=%d,fallback=polling\n", ret);
-		k_timer_start(&poll_timer, K_MSEC(POLL_PERIOD_MS),
-			      K_MSEC(POLL_PERIOD_MS));
-		stream.src = IMU_STREAM_SRC_POLLING;
-		printk("IMU_STREAM,started,src=polling,period_ms=%d\n",
-		       POLL_PERIOD_MS);
+		start_polling_mode();
 	}
 
 	atomic_set(&stream.active, 1);
@@ -218,6 +262,7 @@ void imu_stream_stop(void)
 	}
 
 	atomic_set(&stream.active, 0);
+	k_timer_stop(&trigger_wd_timer);
 
 	if (stream.src == IMU_STREAM_SRC_TRIGGER) {
 		(void)sensor_trigger_set(imu_dev, &drdy_trig, NULL);

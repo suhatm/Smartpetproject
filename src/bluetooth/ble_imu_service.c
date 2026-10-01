@@ -63,8 +63,20 @@ static const struct bt_uuid_128 imu_ctrl_chr_uuid =
 /** 最新包序号（uint8 wrap） */
 static uint8_t packet_seq;
 
+/** 首包成功日志一次性标志（bring-up 诊断） */
+static bool notify_seen;
+
 /** 当前连接句柄（connected/disconnected 回调维护，NULL 表示未连接） */
 static struct bt_conn *current_conn;
+
+/*
+ * 坑（2026-10-01 实测踩过）：BT_GATT_CCC 第二个参数是【权限位】不是 CCC 值。
+ * 写成 BT_GATT_CCC(ccc_cfg_changed, BT_GATT_CCC_NOTIFY) 时，
+ * BT_GATT_CCC_NOTIFY(0x0001) 恰好等于 BT_GATT_PERM_READ(0x01)，
+ * 描述符成了只读 → 手机写 CCC 被栈拒绝（Write Not Permitted），
+ * ccc_cfg_changed 永远不会回调，Notify 订阅也就永远开不起来。
+ * 正确写法见官方样例 peripheral_power_profiling：READ | WRITE。
+ */
 
 /** CCC 订阅状态变化（App 打开/关闭 Notify） */
 static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
@@ -72,7 +84,7 @@ static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	ARG_UNUSED(attr);
 
 	printk("IMU_BLE,ccc,value=0x%04x%s\n", value,
-	       (value == BT_GATT_CCC_NOTIFY) ? ",notify_on" : "");
+	       (value == BT_GATT_CCC_NOTIFY) ? ",notify_on" : ",notify_off");
 }
 
 /* ---- 前向声明（BT_GATT_SERVICE_DEFINE 引用在先） ---- */
@@ -92,7 +104,7 @@ BT_GATT_SERVICE_DEFINE(imu_stream_svc,
 			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
 			       BT_GATT_PERM_READ,
 			       read_data, NULL, NULL),
-	BT_GATT_CCC(ccc_cfg_changed, BT_GATT_CCC_NOTIFY),
+	BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 	BT_GATT_CHARACTERISTIC(&imu_ctrl_chr_uuid.uuid,
 			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
 			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
@@ -150,6 +162,11 @@ static void notify_work_handler(struct k_work *work)
 		/* 典型 -ENOMEM：ACL TX 缓冲耗尽，本包丢，下拍继续 */
 		printk("IMU_BLE,notify_rc=%d,frames_lost=%u\n", ret,
 		       (unsigned)cnt);
+	} else if (!notify_seen) {
+		/* 首包成功：确认 Notify 通路真的通了（bring-up 诊断用） */
+		notify_seen = true;
+		printk("IMU_BLE,notify_ok,mtu=%u,frames=%u\n",
+		       (unsigned)bt_gatt_get_mtu(conn), (unsigned)cnt);
 	}
 
 resched:
@@ -176,6 +193,7 @@ static void ctrl_work_handler(struct k_work *work)
 		printk("IMU_BLE,start_rc=%d\n", ret);
 		if (ret == 0) {
 			/* 启动成功：立即打包一拍（App 马上能看到数据） */
+			notify_seen = false;
 			k_work_reschedule(&notify_work, K_NO_WAIT);
 		}
 	} else if (cmd == 2) {
