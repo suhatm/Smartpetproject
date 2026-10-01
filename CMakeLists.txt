@@ -8,6 +8,7 @@ target_sources(app PRIVATE
     src/bluetooth/ble_led_service.c
     src/hardware/power_control.c
     src/hardware/status_led.c
+    src/hardware/imu_sensor.c
 )
 
 target_include_directories(app PRIVATE

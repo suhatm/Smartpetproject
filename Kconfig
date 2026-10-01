@@ -70,6 +70,17 @@ config APP_HEARTBEAT_FLASH_MS
 	help
 	  心跳单次闪烁的点亮时长（默认 100 ms，双灯同亮）。
 
+config APP_IMU_TEST
+	bool "IMU (U4 LSM6DSV16X) I2C bring-up self-test"
+	default y
+	help
+	  IMU 连通性自检（task-V1.03，docs/IMU采集测试方案.md）：
+	  NFC pad 归还（P1.02/P1.03 -> GPIO，NFCT.PADCONFIG 运行时写 0）、
+	  VDD_SENS_3V0 上电、SENS_I2C（i2c21）总线扫描、
+	  U4 WHO_AM_I 校验（0x0F，期望 0x70，两个候选地址 0x6A/0x6B）。
+	  自检完成后 SENS 电源域下电，结果经 RTT 打印 IMU_TEST,summary。
+	  量产固件可关闭以缩短开机时间。
+
 config APP_POWER_DOMAIN_TEST_MB
 	bool "SWD test mailbox for power domain control (host tool)"
 	default y

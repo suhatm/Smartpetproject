@@ -20,10 +20,14 @@
 };
 
 /*
- * P1.02/P1.03 复位后默认 NFC 功能；后续用作 SENS_I2C，
- * 先在 UICR 中归还为 GPIO（当前电源 UI 暂不启用 i2c21）。
+ * P1.02/P1.03 复位后默认为 NFC 天线 pad（NFCT.PADCONFIG 复位值 0x1=Enabled，
+ * 且每次复位重新加载）。nRF54L 的归还机制与 nRF52 不同：
+ *   - nRF52：UICR.NFCPINS（本芯片 UICR 无此寄存器）
+ *   - nRF54L：运行时直接写 NFCT.PADCONFIG=0 即可归还为 GPIO，无需重启
+ * 实际归还动作在 src/hardware/imu_sensor.c 的 PRE_KERNEL_1 初始化中完成，
+ * 必须早于 i2c21 TWIM 的 pinctrl 应用。
  */
-&uicr {
+&nfct {
 	nfct-pins-as-gpios;
 };
 
@@ -86,4 +90,42 @@
 &hfxo {
 	load-capacitors = "internal";
 	load-capacitance-femtofarad = <8000>;
+};
+
+/*
+ * SENS_I2C（task-V1.03 IMU 采集）：P1.02=SDA / P1.03=SCL，4.7kΩ 上拉（R2/R4）。
+ * 总线挂载：主板 U4 LSM6DSV16XTR（地址由 R6 0Ω 设 SA0）+
+ * FPC1 柔性板（LSM6DSV16X + TMP112，地址由各自 0Ω 电阻区分）。
+ * 400kHz Fast Mode：FIFO 批量读需要带宽余量。
+ */
+&pinctrl {
+	pet_sens_i2c21_default: pet_sens_i2c21_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 2)>,
+				<NRF_PSEL(TWIM_SCL, 1, 3)>;
+		};
+	};
+
+	pet_sens_i2c21_sleep: pet_sens_i2c21_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 2)>,
+				<NRF_PSEL(TWIM_SCL, 1, 3)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c21 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&pet_sens_i2c21_default>;
+	pinctrl-1 = <&pet_sens_i2c21_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/*
+	 * 主板 IMU U4：bring-up 阶段先不挂 sensor 驱动节点，
+	 * 由 imu_sensor.c 用裸 I2C 做 WHO_AM_I 自检；
+	 * 验证通过后（task-V1.03 第二步）改为标准 st,lsm6dsv16x 节点。
+	 */
 };

@@ -33,6 +33,9 @@
 
 #include "power_control.h"
 #include "status_led.h"
+#if CONFIG_APP_IMU_TEST
+#include "imu_sensor.h"
+#endif
 #if CONFIG_APP_BLE_LED_TEST
 #include "ble_led_service.h"
 #endif
@@ -484,6 +487,15 @@ int main(void)
 #if CONFIG_APP_POWER_DOMAIN_SELFTEST
 	/* 4. 三路电源域独立控制自检（SENS/STORE/ANALOG 逐一开关校验） */
 	(void)power_domain_selftest();
+#endif
+
+#if CONFIG_APP_IMU_TEST
+	/* 4.5 IMU 连通性自检（task-V1.03）：NFC pad 归还复核 + i2c21 扫描
+	 * + U4 WHO_AM_I 校验；失败仅打印 FAIL 不阻断启动（同 BLE 策略），
+	 * 便于把电源 UI 主流程与 IMU 问题分开定位。 */
+	if (imu_bringup_test() != 0) {
+		printk("WARN,imu_bringup_failed\n");
+	}
 #endif
 
 #if CONFIG_APP_BOOT_LED_INDICATION
