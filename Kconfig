@@ -119,5 +119,22 @@ config APP_BLE_IMU_STREAM
 	  + 64 帧 k_msgq 环形缓冲 + 50ms 打包 notify。
 	  断开连接自动停止采集。量产固件应置 n（省电 + 明文无安全）。
 
+config APP_IMU_AUTOSTART
+	bool "Auto-start IMU stream on BLE connect"
+	depends on APP_BLE_IMU_STREAM
+	default y
+	help
+	  连接即自动开始采集（断开自动停止）。
+
+	  为什么默认开：控制点 e5a00012（写 0x01）和 Notify 订阅是两步操作，
+	  而手机 App 上"先订阅还是先写控制点"的顺序很容易踩坑——
+	  实测 nRF Connect for Mobile 上出现过"订阅(CCC=0x0001)后紧接着被
+	  取消(CCC=0x0000)"（用户以为没反应就再点了一次下载箭头），
+	  结果是采集在跑、数据全被丢（frames=64,dropped=11122），
+	  手机端什么都看不到。自动开流后，App 只需订阅通知这一步即可见数据。
+
+	  代价：连接期间持续 30Hz 采样（约 0.5 mA 量级），断电由断开自动停止
+	  兜底。量产可按功耗预算置 n，保留控制点显式启停。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"

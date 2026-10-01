@@ -76,17 +76,39 @@ IMU_TEST,summary,PASS,devices=2,failures=0
 
 ### 4.2 App 操作步骤（nRF Connect for Mobile）
 
+固件默认 `APP_IMU_AUTOSTART=y`：**连接即自动开始采集**，App 侧只剩订阅一步。
+
 1. 连接广播名 **SmartPet**
-2. （建议）右上角 Connect 设置里勾选 Request MTU 247 或在连接后手动
-   Request MTU（新版 App 默认自动请求大 MTU）
-3. 展开未知服务 `e5a00010-...`，对 `e5a00011` 点击 **Enable Notify**
-4. 对 `e5a00012` 写入 `01`（Write → 单字节）
-5. `e5a00011` 应开始持续收到数据包；读 `e5a00011` 可查 3 字节状态
-   `[active][src:1=trigger 2=polling][seq]`
-6. 停止：写 `00` 到 `e5a00012`，或直接断开连接
+2. （建议）连接后 Request MTU 247（新版 App 默认自动请求）
+3. 展开未知服务 `e5a00010-...`，对 `e5a00011` 点 **↓ 订阅**（Enable Notify），
+   进入通知页，数据应立刻开始滚动
+4. **订阅按钮只点一次**——再点一次就是取消订阅（CCC 0x0001 → 0x0000），
+   采集照跑但数据全被丢，表现为"手机端一片空白"（见 §6.5）
+5. 停止：写 `00` 到 `e5a00012`，或直接断开连接（断开自动停）
+
+手动启停（`APP_IMU_AUTOSTART=n` 时）：写 `01` 到 `e5a00012` 启动。读
+`e5a00011` 返回 3 字节状态 `[active][src:1=trigger 2=polling][seq]`。
+
+### 4.2.1 电脑端操作（推荐，绕开手机 App 的一切不确定性）
+
+```bash
+pip install bleak
+python tools/imu_ble_monitor.py --scan                 # 确认能扫到
+python tools/imu_ble_monitor.py --duration 20 --quiet  # 连/订阅/启动/解码
+python tools/imu_ble_monitor.py --csv data.csv         # 存 CSV 便于分析
+python tools/imu_ble_monitor.py --raw                  # 附带原始十六进制包
+```
+
+注意两点（都实测踩过）：
+
+- **扫描按服务 UUID 匹配**（`e5a00001-...`），不要按名字——Windows 的 BLE
+  扫描拿不到 scan response，设备名常为空字符串，按名字找会一直"找不到"。
+- 手机若还连着板子，板子已停止广播，电脑扫不到；先断开手机或关掉手机蓝牙。
+  板子在断开后会自动重新广播（`BLE,adv_started`）。
 
 ### 4.3 RTT 日志关键字
 
+- `IMU_BLE,autostart`：连接即自动开流（APP_IMU_AUTOSTART）
 - `IMU_BLE,ccc,value=0x0001,notify_on`：App 订阅成功
 - `IMU_BLE,ctrl_cmd=1` / `IMU_BLE,start_rc=0`：启动命令与结果
 - `IMU_STREAM,started,src=trigger,odr=30Hz,fs=8g|2000dps`：触发模式启动
@@ -169,4 +191,83 @@ CCC 描述符变成**只读** → 手机写 CCC 被协议栈以
    `aUp[0] = {sName, pBuffer, SizeOfBuffer, WrOff, RdOff}`（各 4B）
 4. 按 96B 分块 `nrfutil device read --bytes N --direct --family nrf54l`
    读 pBuffer 区（一次读 128B 有时会截断，脚本要校验长度并重试）
-   脚本：`rtt_dump2.py`
+   项目内脚本：`tools/rtt_dump.py --map <zephyr.map> --tail N`
+
+### 6.4 定标系数错 1000 倍 → int16 溢出，数据"看着像数据"
+
+现象：通道、通知、帧率全部正常，但物理量离谱——`a=(2196,17568,19312) mg`
+（远超 ±8g 量程），`gx` 恒为 -4899。**最容易误判成"传感器坏了/接线不对"。**
+
+原因：`imu_stream.c` 的单位换算分母少写三个 0。
+
+```c
+/* 错：1 g 算出 1_000_000 mg，超 int16（32767）后回绕 */
+mg = micro * 101971621 / 1e9;
+/* 对：8 g 量程对应 8000 mg，永不溢出 */
+mg = micro * 101971621 / 1e12;
+```
+
+回绕值可反推：`1_000_000 mod 65536 = 16960`，与实测 16836/17324 吻合，
+这就是"数据是活的但全是垃圾"的指纹。gyro 同理（`/1e6` 应为 `/1e10`）。
+
+修法要点：
+- accel：`mg  = micro_ms2  × 101971621 / 1e12`（1 m/s² = 101.971621 mg）
+- gyro ：`dps10 = micro_rads × 5729578 / 1e10`（1 rad/s = 572.957795 dps×10）
+- 校验不变式：**静止时 |a| 恒等于 1000 mg**（与摆放姿态无关），
+  gyro 各轴应接近 0（只剩噪声）。这条不变式一次就能验出定标错。
+
+### 6.5 手机端"订阅后被立即取消"（采了 11000 帧一包没发）
+
+现象：RTT 日志里每轮连接都是
+
+```
+BLE,connected
+IMU_BLE,ccc,value=0x0001,notify_on     ← 订阅成功
+IMU_BLE,ccc,value=0x0000,notify_off    ← 紧接着又被取消
+IMU_BLE,ctrl_cmd=1                     ← 然后才写启动命令
+IMU_STREAM,stopped,frames=64,dropped=11122
+```
+
+`dropped=11122` 是关键指纹：采集侧 30Hz 跑了约 6 分钟一切正常，但因为
+**没有订阅**，`notify_work` 每拍都 `goto resched`，队列 64 帧塞满后全部丢弃，
+手机自然永远空屏。
+
+原因不在固件（已用电脑端工具 `tools/imu_ble_monitor.py` 独立验证：
+订阅后 800 包 / 1182 帧 / 40s、`丢包=0`，通路完全正常），而是 App 操作顺序：
+nRF Connect for Mobile 上订阅（↓）与取消订阅是**同一个按钮**，用户在
+"点了订阅没看到数据"（因为当时还没写 `01`，采集没开）时又点了一次，
+于是把订阅取消了。
+
+修法（两侧一起做）：
+
+- 固件侧：新增 `APP_IMU_AUTOSTART`（默认 y）——**连接即自动开始采集**，
+  App 只需订阅一步，彻底消除"先订阅还是先写控制点"的顺序依赖。
+- 使用侧：订阅按钮**只点一次**，之后不要再碰；数据在订阅瞬间就会出现。
+
+### 6.6 附：本机 Windows BLE 扫描的两个坑
+
+- **别按设备名找**：Windows 拿不到 scan response，`adv.local_name` 常为空
+  （实测 SmartPet 显示为 `name=''`）。按**广播里的 128-bit 服务 UUID**
+  （`e5a00001-...`）匹配才可靠。
+- 手机连着时板子已停广播，电脑扫不到；断开后固件会自动重启广播
+  （`BLE,adv_started`），无需复位板子。
+
+## 7. 验收基线（2026-10-01 电脑端实测）
+
+| 指标 | 实测值 | 判定 |
+|------|--------|------|
+| 采样率 | 443 帧 / 15s = 29.5 帧/s | ✅ 等于 30Hz ODR |
+| 通知丢包 | 序号丢包 0（800 包/40s 亦为 0） | ✅ |
+| 静态 accel | `(3, 19, 1000) mg` → \|a\|=1000 mg = 1g | ✅ 定标正确 |
+| 静态 gyro | `(-4, 1, 1) dps×10` ≈ 0 | ✅ |
+| 采集模式 | `IMU_STREAM,started,src=trigger` | ✅ INT1 走线正常，未降级轮询 |
+
+## 8. 变更清单（task-V1.03，第三步：定标与自动开流）
+
+- `src/hardware/imu_stream.c`：修正 accel/gyro 定标分母（1e9→1e12、1e6→1e10），
+  消除 int16 溢出；补换算推导注释与"静止 \|a\|=1000 mg"不变式说明
+- `src/bluetooth/ble_imu_service.c`：连接即自动开流（`IMU_BLE,autostart`）
+- `Kconfig`：+`APP_IMU_AUTOSTART`（默认 y，量产可按功耗置 n）
+- `tools/imu_ble_monitor.py`（新）：电脑端 BLE 六轴监视器（bleak），
+  按服务 UUID 匹配、自动等待设备、解码 mg/dps×10、CSV 落盘
+- `tools/rtt_dump.py`（新，前一步）：SWD 直读 RTT 日志

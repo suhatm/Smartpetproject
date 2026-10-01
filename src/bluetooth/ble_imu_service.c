@@ -278,6 +278,19 @@ static void imu_connected(struct bt_conn *conn, uint8_t err)
 	if (current_conn == NULL) {
 		current_conn = bt_conn_ref(conn);
 	}
+
+#if CONFIG_APP_IMU_AUTOSTART
+	/*
+	 * 连接即开采集：手机 App 只需"订阅通知"一步就能看到数据，
+	 * 不用先写控制点。避开实测踩到的顺序坑——控制点与订阅是两步，
+	 * 用户若在订阅后又点了取消（CCC 0x0001->0x0000），采集照跑但
+	 * 数据全丢（frames=64,dropped=11122），App 端一片空白。
+	 * imu_stream_start() 幂等，随后的显式 0x01 写入也不会出错。
+	 */
+	atomic_set(&pending_cmd, 1);
+	k_work_submit(&ctrl_work);
+	printk("IMU_BLE,autostart\n");
+#endif
 }
 
 static void imu_disconnected(struct bt_conn *conn, uint8_t reason)

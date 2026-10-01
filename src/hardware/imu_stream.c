@@ -10,9 +10,10 @@
  *   - 两条路径共用 sample_push()，内部 sensor_sample_fetch + 换算 + 入队。
  *
  * 换算（Zephyr sensor_value = val1 + val2/1e6）：
- *   accel 通道单位 m/s²：mg = micro × 101971621 / 1e9（1 m/s²=101.971621 mg）
- *   gyro  通道单位 rad/s：dps×10 = micro × 572958 / 1e6（1 rad/s=572.9578 dps×10）
+ *   accel 通道单位 m/s²：mg = micro × 101971621 / 1e12（1 m/s²=101.971621 mg）
+ *   gyro  通道单位 rad/s：dps×10 = micro × 5729578 / 1e10（1 rad/s=572.957795 dps×10）
  *   均 int64 定点运算 + 四舍五入，无浮点。
+ *   注意分母：量程内（±8g / ±2000dps）结果落在 int16，写错 1000 倍会溢出。
  */
 #include "imu_stream.h"
 
@@ -82,13 +83,30 @@ static const struct sensor_trigger drdy_trig = {
 /** m/s²(micro) -> mg，int64 + 四舍五入 */
 static inline int16_t micro_ms2_to_mg(int64_t micro)
 {
-	return (int16_t)((micro * 101971621LL + 500000000LL) / 1000000000LL);
+	/*
+	 * 1 g = 9.80665 m/s² = 1000 mg → mg = V(m/s²) × 1000/9.80665
+	 *                                     = V × 101.9716212978
+	 * micro = V × 1e6 → mg = micro × 101971621 / 1e12
+	 *
+	 * 坑（2026-10-01 上板实测）：这里最初写成 / 1e9，结果 1 g 算出
+	 * 1_000_000 mg，int16 溢出回绕成 ~16960 —— 数值看着"像数据"、
+	 * 通道/通知全正常，只有物理量是错的。8 g 量程对应 8000 mg，
+	 * 正确换算下绝不会溢出。
+	 */
+	return (int16_t)((micro * 101971621LL + 500000000000LL) /
+			 1000000000000LL);
 }
 
 /** rad/s(micro) -> dps×10，int64 + 四舍五入 */
 static inline int16_t micro_rads_to_dps10(int64_t micro)
 {
-	return (int16_t)((micro * 572958LL + 500000LL) / 1000000LL);
+	/*
+	 * 1 rad/s = 57.2957795 dps → dps×10 = V(rad/s) × 572.957795
+	 * micro = V × 1e6 → dps10 = micro × 5729578 / 1e10
+	 * （同理勿写成 / 1e6，会大 1000 倍后溢出）
+	 */
+	return (int16_t)((micro * 5729578LL + 5000000000LL) /
+			 10000000000LL);
 }
 
 /**
