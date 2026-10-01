@@ -69,6 +69,17 @@ static bool notify_seen;
 /** 当前连接句柄（connected/disconnected 回调维护，NULL 表示未连接） */
 static struct bt_conn *current_conn;
 
+#if CONFIG_APP_BLE_IDLE_TIMEOUT_SEC > 0
+/** CCC 订阅态（1=Notify 开）——空闲看门狗用，订阅中的连接永不断开 */
+static atomic_t notify_subscribed = ATOMIC_INIT(0);
+/** 最近一次对端活动时刻（k_uptime_get_32，32位ms约49天回绕，够用） */
+static atomic_t last_peer_activity_ms = ATOMIC_INIT(0);
+#else
+/* 看门狗关闭时仍保留变量，让 ccc_cfg_changed 等处的引用无需条件编译 */
+static atomic_t notify_subscribed = ATOMIC_INIT(0);
+static atomic_t last_peer_activity_ms = ATOMIC_INIT(0);
+#endif
+
 /*
  * 坑（2026-10-01 实测踩过）：BT_GATT_CCC 第二个参数是【权限位】不是 CCC 值。
  * 写成 BT_GATT_CCC(ccc_cfg_changed, BT_GATT_CCC_NOTIFY) 时，
@@ -82,6 +93,10 @@ static struct bt_conn *current_conn;
 static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
 	ARG_UNUSED(attr);
+
+	atomic_set(&notify_subscribed,
+		   (value == BT_GATT_CCC_NOTIFY) ? 1 : 0);
+	atomic_set(&last_peer_activity_ms, (atomic_val_t)k_uptime_get_32());
 
 	printk("IMU_BLE,ccc,value=0x%04x%s\n", value,
 	       (value == BT_GATT_CCC_NOTIFY) ? ",notify_on" : ",notify_off");
@@ -218,6 +233,8 @@ static ssize_t read_data(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 		packet_seq,
 	};
 
+	atomic_set(&last_peer_activity_ms, (atomic_val_t)k_uptime_get_32());
+
 	return bt_gatt_attr_read(conn, attr, buf, len, offset,
 				 state, sizeof(state));
 }
@@ -229,6 +246,8 @@ static ssize_t read_ctrl(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			 void *buf, uint16_t len, uint16_t offset)
 {
 	uint8_t val = imu_stream_active() ? 1U : 0U;
+
+	atomic_set(&last_peer_activity_ms, (atomic_val_t)k_uptime_get_32());
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset,
 				 &val, sizeof(val));
@@ -264,9 +283,66 @@ static ssize_t write_ctrl(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 
 	k_work_submit(&ctrl_work);
 	printk("IMU_BLE,ctrl_cmd=%u\n", *val);
+	atomic_set(&last_peer_activity_ms, (atomic_val_t)k_uptime_get_32());
 
 	return len;
 }
+
+/* ---- 僵尸连接看门狗（APP_BLE_IDLE_TIMEOUT_SEC，0=禁用） ----
+ *
+ * 背景（2026-10-01 实测踩坑）：链路层监督超时只救得了"手机走远/
+ * 关蓝牙"（prj.conf 里 0.42s 就会断开恢复广播）；但"App 被杀、
+ * 手机蓝牙还开着、人在旁边"时，链路层 PDUs 仍在正常交换，监督超时
+ * 永远不触发——板子就一直不广播，任何新设备都搜不到它。
+ *
+ * 策略：连接后若【未订阅通知】且【超过阈值时间没有任何读写/订阅】，
+ * 判定为僵尸连接，主动断开恢复广播。订阅中的活跃连接不受影响；
+ * 任何一次读、写、订阅/取消订阅都会刷新活动时间戳。
+ */
+#if CONFIG_APP_BLE_IDLE_TIMEOUT_SEC > 0
+#define IDLE_CHECK_PERIOD_SEC 15
+
+static void idle_work_handler(struct k_work *work);
+
+static K_WORK_DELAYABLE_DEFINE(idle_work, idle_work_handler);
+
+static void idle_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (current_conn == NULL) {
+		return; /* 已断开：停止自调度（下次连接时重新启动） */
+	}
+
+	if (atomic_get(&notify_subscribed) != 0) {
+		/* 活跃订阅中：永不主动断开，继续观察 */
+		k_work_reschedule(&idle_work,
+				  K_SECONDS(IDLE_CHECK_PERIOD_SEC));
+		return;
+	}
+
+	uint32_t idle_ms = k_uptime_get_32() -
+			   (uint32_t)atomic_get(&last_peer_activity_ms);
+
+	if (idle_ms >= (uint32_t)CONFIG_APP_BLE_IDLE_TIMEOUT_SEC * 1000U) {
+		printk("IMU_BLE,idle_disconnect,idle_s=%u\n",
+		       idle_ms / 1000U);
+		int ret = bt_conn_disconnect(
+			current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+
+		if (ret != 0) {
+			/* 断开请求失败（罕见）：继续观察，别死循环 */
+			printk("IMU_BLE,idle_disconnect_rc=%d\n", ret);
+			k_work_reschedule(&idle_work,
+					  K_SECONDS(IDLE_CHECK_PERIOD_SEC));
+		}
+		/* 成功路径：disconnected 回调会取消本 work 并重启广播 */
+		return;
+	}
+
+	k_work_reschedule(&idle_work, K_SECONDS(IDLE_CHECK_PERIOD_SEC));
+}
+#endif /* APP_BLE_IDLE_TIMEOUT_SEC > 0 */
 
 /* ---- 连接管理：维护连接句柄 + 断开自动停采集（省电/防孤儿流） ---- */
 
@@ -278,6 +354,10 @@ static void imu_connected(struct bt_conn *conn, uint8_t err)
 	if (current_conn == NULL) {
 		current_conn = bt_conn_ref(conn);
 	}
+	atomic_set(&last_peer_activity_ms, (atomic_val_t)k_uptime_get_32());
+#if CONFIG_APP_BLE_IDLE_TIMEOUT_SEC > 0
+	k_work_reschedule(&idle_work, K_SECONDS(IDLE_CHECK_PERIOD_SEC));
+#endif
 
 #if CONFIG_APP_IMU_AUTOSTART
 	/*
@@ -299,6 +379,10 @@ static void imu_disconnected(struct bt_conn *conn, uint8_t reason)
 		bt_conn_unref(current_conn);
 		current_conn = NULL;
 	}
+	atomic_set(&notify_subscribed, 0);
+#if CONFIG_APP_BLE_IDLE_TIMEOUT_SEC > 0
+	(void)k_work_cancel_delayable(&idle_work);
+#endif
 
 	if (imu_stream_active()) {
 		printk("IMU_BLE,disconnect_stop,reason=0x%02x\n", reason);

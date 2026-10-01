@@ -271,3 +271,31 @@ nRF Connect for Mobile 上订阅（↓）与取消订阅是**同一个按钮**�
 - `tools/imu_ble_monitor.py`（新）：电脑端 BLE 六轴监视器（bleak），
   按服务 UUID 匹配、自动等待设备、解码 mg/dps×10、CSV 落盘
 - `tools/rtt_dump.py`（新，前一步）：SWD 直读 RTT 日志
+
+### 6.7 MPSL 死锁复现 + wdt31 活性门控实锤（2026-10-01 晚）
+
+**现象**：PC 端二次连接后 `IMU_BLE,autostart` 打印但 `IMU_STREAM,started` 不出现，
+RTT 日志冻结、广播停止（手机/电脑均搜不到）。SWD halt 采样 PC 却显示 CPU 在
+idle/TWIM 间正常切换——**main 主循环活着，sysworkq 被饿死**（MPSL
+calibration_work 协作优先级死锁复发，`CONFIG_MPSL_HFCLK_LATENCY=1650` 未能杜绝）。
+
+**一版看门狗教训**：喂狗放在 main 主循环 → 死锁场景下 main 活着、一直喂得上，
+30s 永不复位，看门狗形同虚设。
+
+**二版（活性门控）**：main 每拍 `app_watchdog_kick()` 仅递增心跳；sysworkq 周期
+work（5s）检查心跳有变化才 `wdt_feed()`。双活才喂：
+- sysworkq 饿死 → feed work 不执行 → 30s 硬件复位
+- main 卡死 → 心跳不动 → feed work 拒喂 → 30s 硬件复位
+
+**实测验证**（RTT 三次启动拼接日志）：
+1. boot#2 正常广播 → PC 连接 → autostart → 死锁（无 stream started）
+2. PC 监督超时断开（0x08）→ 广播未恢复（僵尸态）
+3. **30s 后 wdt31 超时复位** → boot#3 `RESET,cause=0x00000004,wdt31` → 广播恢复
+
+**nRF54L15 RESETREAS 位**（与 nRF52 不同，勿凭经验猜）：
+bit0 RESETPIN / bit1 DOG0(wdt30) / bit2 DOG1(wdt31) / bit3 CTRLAPSOFT /
+bit4 CTRLAPHARD / bit5 CTRLAPPIN / bit6 SREQ(软复位) / bit7 LOCKUP / bit8 OFF。
+即 0x40=软复位（nrfutil reset 也是），0x04=wdt31。
+
+**遗留**：boot 后首次自检偶发崩溃一次（SREQ 重启后自愈，boot#2/#3 均未复现），
+待观察。Windows 端 GATT 缓存会导致 `没发现 e5a00011`，删设备或用手机 App 验证。

@@ -10,6 +10,7 @@ target_sources(app PRIVATE
     src/hardware/power_control.c
     src/hardware/status_led.c
     src/hardware/imu_sensor.c
+    src/hardware/app_watchdog.c
     src/hardware/imu_stream.c
 )
 

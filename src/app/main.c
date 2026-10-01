@@ -33,6 +33,7 @@
 
 #include "power_control.h"
 #include "status_led.h"
+#include "app_watchdog.h"
 #if CONFIG_APP_IMU_TEST
 #include "imu_sensor.h"
 #endif
@@ -41,6 +42,9 @@
 #endif
 #if CONFIG_APP_POWER_DOMAIN_TEST_MB
 #include "test_mailbox.h"
+#endif
+#if CONFIG_APP_HW_WATCHDOG
+#include <nrfx.h> /* NRF_RESET->RESETREAS（nRF54L 无 hwinfo 驱动，裸读） */
 #endif
 
 /** nPM1300 PMIC 的设备树节点 */
@@ -452,6 +456,30 @@ int main(void)
 	       "emergency_reset_s=10\n", SHUTDOWN_ARM_MS);
 	printk("HW_NOTE,led2_polarity_reversed_expect_no_blue\n");
 
+#if CONFIG_APP_HW_WATCHDOG
+	{
+		/*
+		 * 复位原因（RESET.RESETREAS 裸读：nRF54L 无 hwinfo 驱动）。
+		 * 看门狗复位（DOG0/DOG1）会在此留痕——WDT 兜底触发的自愈
+		 * 在日志上可辨识，不与正常上电混淆。
+		 */
+		uint32_t cause = NRF_RESET->RESETREAS;
+
+		printk("RESET,cause=0x%08x%s%s%s%s%s\n", cause,
+		       (cause & RESET_RESETREAS_DOG0_Msk) ? ",wdt0" : "",
+		       (cause & RESET_RESETREAS_DOG1_Msk) ? ",wdt31" : "",
+		       (cause & RESET_RESETREAS_RESETPIN_Msk) ? ",pin" : "",
+		       (cause & RESET_RESETREAS_CTRLAPSOFT_Msk) ? ",ctrl_soft" : "",
+		       (cause & RESET_RESETREAS_CTRLAPHARD_Msk) ? ",ctrl_hard" : "");
+		/* 写 1 清除，避免下次启动重复报告 */
+		NRF_RESET->RESETREAS = cause;
+	}
+#endif
+
+	/* 0. 尽早武装硬件看门狗：覆盖后面所有初始化与运行期；
+	 * main 主循环喂狗（20ms/拍），任何线程/闭源库挂死 -> 复位恢复 */
+	(void)app_watchdog_init();
+
 	/* 1. 检查 PMIC 是否就绪 */
 	if (!device_is_ready(pmic)) {
 		printk("FATAL,pmic_not_ready\n");
@@ -556,6 +584,7 @@ int main(void)
 	while (true) {
 		int64_t now_ms = k_uptime_get();
 
+		app_watchdog_kick();           /* 心跳：sysworkq 门控喂狗 */
 		handle_events(now_ms);          /* 按键/VBUS 事件 */
 		ret = update_led_pattern(now_ms);  /* LED 状态指示 */
 		if ((ret != 0) && (app_state != APP_STATE_FAULT)) {

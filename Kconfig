@@ -136,5 +136,45 @@ config APP_IMU_AUTOSTART
 	  代价：连接期间持续 30Hz 采样（约 0.5 mA 量级），断电由断开自动停止
 	  兜底。量产可按功耗预算置 n，保留控制点显式启停。
 
+config APP_BLE_IDLE_TIMEOUT_SEC
+	int "BLE zombie-connection idle timeout (seconds, 0 = disabled)"
+	depends on APP_BLE_IMU_STREAM
+	default 120
+	range 0 3600
+	help
+	  僵尸连接看门狗：连接后若【未订阅 Notify】且持续该时长没有任何
+	  读/写/订阅操作，固件主动断开并重新广播。
+
+	  背景：BLE 链路层监督超时（prj.conf 当前 0.42s）只能救"手机走远/
+	  关蓝牙"；若手机 App 被直接杀死而系统蓝牙仍开着、且设备在通信
+	  范围内，链路层 PDUs 一直正常交换，监督超时永不触发——板子停在
+	  "已连接"状态不再广播，任何新设备都搜不到（2026-10-01 手机与
+	  电脑端均实测复现，只能重新上电/复位恢复）。
+
+	  判定刻意保守：订阅中的活跃连接永不断开；任何一次读特征值、
+	  写控制点、订阅/取消订阅都会刷新活动时间戳。置 0 禁用。
+
+config APP_HW_WATCHDOG
+	bool "Hardware watchdog (wdt31) as last-resort hang recovery"
+	default y
+	help
+	  硬件看门狗兜底（详见 src/hardware/app_watchdog.h 注释）：
+	  2026-10-01 SWD 实锤，手机断开连接瞬间 Nordic MPSL 私有工作
+	  队列线程（协作优先级 -10）在闭源库内部死锁，饿死 sysworkq
+	  （广播重启 work 永不执行）与 main 线程——板子"不广播、无
+	  日志"假死，只能重新上电。应用层看门狗对高优先级线程挂死
+	  无能为力，唯一可靠兜底是硬件复位。main 主循环（20ms）喂狗，
+	  调试器 halt 时自动暂停计数（WDT_OPT_PAUSE_HALTED_BY_DBG）。
+
+config APP_WATCHDOG_TIMEOUT_SEC
+	int "Hardware watchdog timeout (seconds)"
+	depends on APP_HW_WATCHDOG
+	default 30
+	range 5 600
+	help
+	  看门狗超时：挂死后最长的假死时间（复位 + 重启约 1~2s）。
+	  30s 对宠物环够用；若调试期嫌复位烦可调大或临时关掉
+	  APP_HW_WATCHDOG。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"
