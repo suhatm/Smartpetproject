@@ -33,6 +33,9 @@
 
 #include "power_control.h"
 #include "status_led.h"
+#if CONFIG_APP_BLE_LED_TEST
+#include "ble_led_service.h"
+#endif
 #if CONFIG_APP_POWER_DOMAIN_TEST_MB
 #include "test_mailbox.h"
 #endif
@@ -227,6 +230,12 @@ static void request_graceful_shutdown(void)
 
 	printk("POWER_BUTTON,action=shutdown_requested\n");
 
+#if CONFIG_APP_BLE_LED_TEST
+	/* 关机前断开蓝牙连接并停止广播（方案 §3.3）：
+	 * 蓝闪指示与进 Ship 之后设备不再对外可见 */
+	ble_led_test_shutdown();
+#endif
+
 	/* 1. 关闭所有电源轨并回读校验 */
 	ret = power_domains_all_off();
 	if (ret == 0) {
@@ -392,6 +401,18 @@ static int update_led_pattern(int64_t now_ms)
 		/* 注意：只表示 USB/仅充电模式，不代表实际充电电流 */
 		red = ((uint32_t)now_ms % 1000U) < 500U;
 	} else {
+#if CONFIG_APP_BLE_LED_TEST
+		/* BLE 测试 override（方案 §3.3 仲裁第 4 级）：
+		 * 仅在 ACTIVE 且无按键/充电/故障抢占时可见，
+		 * 覆盖心跳层；断开连接后 override 自动清除回落原逻辑 */
+		uint8_t ble_mask;
+
+		if (ble_led_override_get(&ble_mask)) {
+			return status_led_set(
+				(ble_mask & 0x01U) != 0U,
+				(ble_mask & 0x02U) != 0U);
+		}
+#endif
 #if CONFIG_APP_HEARTBEAT_LED
 		/* ACTIVE：心跳指示——每 HEARTBEAT_PERIOD_MS 双灯同亮 HEARTBEAT_FLASH_MS */
 		uint32_t beat = (uint32_t)now_ms % HEARTBEAT_PERIOD_MS;
@@ -496,12 +517,25 @@ int main(void)
 		printk("SYSTEM_STATE,mode=active,vbus=0,rails=off\n");
 	}
 
+#if CONFIG_APP_BLE_LED_TEST
+	/* 7.5 蓝牙从机初始化（异步：栈就绪后自动开始广播）。
+	 * 失败仅告警不进 FAULT——蓝牙为附加功能，电源 UI 主流程
+	 * 必须继续（方案 §7 风险 6）。 */
+	ret = ble_led_test_init();
+	if (ret != 0) {
+		printk("WARN,ble_init_failed,rc=%d\n", ret);
+	}
+#endif
+
 	printk("LED_MAP,red=nPM1300_LED0,blue=nPM1300_LED1\n");
 	printk("LED_PATTERN,boot=red_blink_3s,ready=both_blink_3s,"
 	       "shutdown=blue_blink_3s\n");
 #if CONFIG_APP_HEARTBEAT_LED
 	printk("LED_PATTERN,heartbeat=both_flash_%ums_every_%ums\n",
 	       HEARTBEAT_FLASH_MS, HEARTBEAT_PERIOD_MS);
+#endif
+#if CONFIG_APP_BLE_LED_TEST
+	printk("BLE,svc=e5a00001,chr=e5a00002,name=SmartPet\n");
 #endif
 	printk("BUTTON_UI,short=status_ack,hold_1s=arming_red,"
 	       "hold_3s=release_to_ship_red_blue\n");

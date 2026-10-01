@@ -79,5 +79,19 @@ config APP_POWER_DOMAIN_TEST_MB
 	  下发三电源域独立开关命令（SENS/STORE/ANA 单独开、关、
 	  全开、全关、状态查询）。仅调试用，量产固件应关闭。
 
+config APP_BLE_LED_TEST
+	bool "BLE peripheral LED control test service (nRF Connect App)"
+	depends on BT
+	default y
+	help
+	  蓝牙从机 LED 测试服务（docs/蓝牙驱动测试方案.md，task-V1.02）：
+	  广播名 SmartPet，自定义 GATT 服务
+	  e5a00001-1e5c-4b8f-9a2d-6c0f7e8d9a0b，特征值 e5a00002
+	  （Read/Write，1 字节位图：bit0=LED0红 bit1=LED1蓝）。
+	  手机 nRF Connect App 连接后可控制两灯开关。
+	  不影响原有 LED 状态机：BLE 显示层优先级低于故障/按键/充电，
+	  仅在 ACTIVE 空闲态覆盖心跳层；断开连接自动清除。
+	  注意：量产固件应置 n（省电；且当前免配对明文写入有安全风险）。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"

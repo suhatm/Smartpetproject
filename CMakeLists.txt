@@ -5,10 +5,12 @@ project(smartpetring_power_ui)
 target_sources(app PRIVATE
     src/app/main.c
     src/app/test_mailbox.c
+    src/bluetooth/ble_led_service.c
     src/hardware/power_control.c
     src/hardware/status_led.c
 )
 
 target_include_directories(app PRIVATE
+    src/bluetooth
     src/hardware
 )

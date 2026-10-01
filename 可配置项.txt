@@ -78,3 +78,22 @@ CONFIG_APP_POWER_DOMAIN_TEST_MB=n
 2026-09-30  task-V1.01 新增 SWD 电源域测试邮箱
             APP_POWER_DOMAIN_TEST_MB（默认开，量产须关）及上位机
             tools/power_domain_test.py。
+
+9. CONFIG_APP_BLE_LED_TEST            【可选项·默认开 y】（task-V1.02 新增）
+   名称：蓝牙从机 LED 测试服务（nRF Connect App 控制）
+   作用：开启 BLE 从机，广播名 SmartPet，注册自定义 GATT 服务
+         e5a00001-1e5c-4b8f-9a2d-6c0f7e8d9a0b，特征值 e5a00002
+         （Read/Write，1 字节位图：bit0=LED0红 bit1=LED1蓝）。
+         手机 nRF Connect App 连接后可开关两灯，且不影响原有
+         LED 状态机（BLE 显示层优先级低于故障/按键/充电，仅在
+         ACTIVE 空闲态覆盖心跳层；断开连接自动清除）。
+   依赖：需同时开 CONFIG_BT=y / CONFIG_BT_PERIPHERAL=y /
+         CONFIG_BT_DEVICE_NAME="SmartPet"（prj.conf 已配好）。
+   取值：y / n；默认 y。
+   注意：量产固件建议置 n（省电；且当前免配对明文写入有安全
+         风险，量产前需评估配对/加密）。
+
+变更记录追加：
+2026-09-30  task-V1.02 新增蓝牙从机 LED 测试服务
+            APP_BLE_LED_TEST（默认开，量产须关），
+            详见 docs/蓝牙驱动测试方案.md。
