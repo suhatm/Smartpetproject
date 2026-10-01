@@ -12,6 +12,9 @@ target_sources(app PRIVATE
     src/hardware/imu_sensor.c
     src/hardware/app_watchdog.c
     src/hardware/imu_stream.c
+    src/hardware/temp_sensor.c
+    src/hardware/sd_store.c
+    src/hardware/mic_pdm.c
 )
 
 target_include_directories(app PRIVATE

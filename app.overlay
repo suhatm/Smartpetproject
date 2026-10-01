@@ -147,6 +147,89 @@
 		drdy-pin = <1>;
 		status = "okay";
 	};
+
+	/*
+	 * 柔性板 U2 TMP112A 温度传感器（task-V1.04）：
+	 *   - 地址 0x48：ADD0 接地（原理图 P1 页）
+	 *   - zephyr,deferred-init：同 IMU，VDD_SENS 上电后手动 device_init
+	 *   - ALERT 接地未用，仅轮询读温
+	 *   - 经 FPC 在柔性板上，未插排线时扫描不到属预期（ABSENT 非故障）
+	 */
+	temp_u2: tmp112@48 {
+		compatible = "ti,tmp112";
+		reg = <0x48>;
+		zephyr,deferred-init;
+		status = "okay";
+	};
+};
+
+/*
+ * SD NAND 存储 U12 CSNP1GCR01-BOW（task-V1.04，1Gb=128MB，SD 2.0 SPI 模式）：
+ *   SCK=P2.01(经R27 33Ω) MOSI=P2.02 MISO=P2.04 CS=P2.05(R26 47k上拉)
+ * 用 spi00（32MHz 高速域，P2 引脚配对；spi20-23 上限 8MHz）。
+ * 初期保守 8MHz，稳定后可提频。电源 VDD_STORE_3V0_SW 由 PMIC LDO2 门控，
+ * 测试前需 power_domain_set(POWER_DOMAIN_STORE, true)。
+ */
+&pinctrl {
+	pet_sd_spi00_default: pet_sd_spi00_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+		};
+	};
+
+	pet_sd_spi00_sleep: pet_sd_spi00_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi00 {
+	status = "okay";
+	pinctrl-0 = <&pet_sd_spi00_default>;
+	pinctrl-1 = <&pet_sd_spi00_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+
+	sdcard@0 {
+		compatible = "zephyr,sdhc-spi-slot";
+		reg = <0>;
+		status = "okay";
+		spi-max-frequency = <8000000>;
+
+		sdmmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};
+
+/*
+ * 双 PDM 麦克风 U5/U6 IM69D128（task-V1.04，立体声分时隙）：
+ *   CLK=P1.12 共享；DATA 各经 100Ω 汇至 DIN=P1.10
+ *   U5 LR select=VDD（右时隙），U6 LR select=GND（左时隙）
+ * 与 Zephyr dmic 示例 bl54l15_dvk 同款接法（CLK 恰同 P1.12）。
+ */
+&pinctrl {
+	pet_mic_pdm20_default: pet_mic_pdm20_default {
+		group1 {
+			psels = <NRF_PSEL(PDM_CLK, 1, 12)>,
+				<NRF_PSEL(PDM_DIN, 1, 10)>;
+		};
+	};
+};
+
+dmic_dev: &pdm20 {
+	status = "okay";
+	pinctrl-0 = <&pet_mic_pdm20_default>;
+	pinctrl-names = "default";
+	clock-source = "PCLK32M";
 };
 
 /*

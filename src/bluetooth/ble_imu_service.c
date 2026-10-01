@@ -23,6 +23,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <stdint.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/kernel.h>
@@ -59,6 +60,11 @@ static const struct bt_uuid_128 imu_data_chr_uuid =
 static const struct bt_uuid_128 imu_ctrl_chr_uuid =
 	BT_UUID_INIT_128(0x0b, 0x9a, 0x8d, 0x7e, 0x0f, 0x6c, 0x2d, 0x9a,
 			 0x8f, 0x4b, 0x5c, 0x1e, 0x12, 0x00, 0xa0, 0xe5);
+
+/* 温度特征值 e5a00013（int16 小端，单位 0.01°C；TMP112 U2） */
+static const struct bt_uuid_128 temp_chr_uuid =
+	BT_UUID_INIT_128(0x0b, 0x9a, 0x8d, 0x7e, 0x0f, 0x6c, 0x2d, 0x9a,
+			 0x8f, 0x4b, 0x5c, 0x1e, 0x13, 0x00, 0xa0, 0xe5);
 
 /** 最新包序号（uint8 wrap） */
 static uint8_t packet_seq;
@@ -111,6 +117,16 @@ static ssize_t read_ctrl(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 static ssize_t write_ctrl(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			  const void *buf, uint16_t len, uint16_t offset,
 			  uint8_t flags);
+static ssize_t read_temp(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			 void *buf, uint16_t len, uint16_t offset);
+
+/** 温度 CCC 订阅回调（与 IMU 流 CCC 分开，语义独立） */
+static void temp_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	ARG_UNUSED(attr);
+	printk("TEMP_BLE,ccc,value=0x%04x%s\n", value,
+	       (value == BT_GATT_CCC_NOTIFY) ? ",notify_on" : ",notify_off");
+}
 
 /** IMU 数据流服务（链接期静态注册；attrs[2] = 数据流特征值，notify 用） */
 BT_GATT_SERVICE_DEFINE(imu_stream_svc,
@@ -124,6 +140,12 @@ BT_GATT_SERVICE_DEFINE(imu_stream_svc,
 			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
 			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
 			       read_ctrl, write_ctrl, NULL),
+	/* 温度：attrs[6]=decl attrs[7]=value(notify 用) attrs[8]=CCC */
+	BT_GATT_CHARACTERISTIC(&temp_chr_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ,
+			       read_temp, NULL, NULL),
+	BT_GATT_CCC(temp_ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
 /* ---- Notify 打包：50ms 周期从 imu_stream 缓冲取帧发送 ---- */
@@ -403,3 +425,31 @@ int ble_imu_service_init(void)
 }
 
 #endif /* CONFIG_APP_BLE_IMU_STREAM */
+
+/* ---- 温度通知（TMP112 U2，e5a00013） ---- */
+
+/** 最新温度缓存（0.01°C 单位；INT16_MIN=无效） */
+static int16_t latest_temp_centi = INT16_MIN;
+
+ssize_t read_temp(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+		  void *buf, uint16_t len, uint16_t offset)
+{
+	return bt_gatt_attr_read(conn, attr, buf, len, offset,
+				 &latest_temp_centi, sizeof(latest_temp_centi));
+}
+
+int ble_imu_service_notify_temp(int32_t mdeg)
+{
+	struct bt_conn *conn = current_conn;
+
+	if (conn == NULL) {
+		return -ENOTCONN;
+	}
+	latest_temp_centi = (int16_t)(mdeg / 10); /* 0.001°C -> 0.01°C */
+	if (!bt_gatt_is_subscribed(conn, &imu_stream_svc.attrs[7],
+				   BT_GATT_CCC_NOTIFY)) {
+		return -EACCES;
+	}
+	return bt_gatt_notify(NULL, &imu_stream_svc.attrs[7],
+			      &latest_temp_centi, sizeof(latest_temp_centi));
+}

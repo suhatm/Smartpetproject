@@ -37,6 +37,16 @@
 #if CONFIG_APP_IMU_TEST
 #include "imu_sensor.h"
 #endif
+#if CONFIG_APP_TEMP_TEST
+#include "temp_sensor.h"
+#include "ble_imu_service.h"
+#endif
+#if CONFIG_APP_SD_TEST
+#include "sd_store.h"
+#endif
+#if CONFIG_APP_MIC_TEST
+#include "mic_pdm.h"
+#endif
 #if CONFIG_APP_BLE_LED_TEST
 #include "ble_led_service.h"
 #endif
@@ -526,6 +536,29 @@ int main(void)
 	}
 #endif
 
+#if CONFIG_APP_TEMP_TEST
+	/* 4.6 TMP112 温度自检（task-V1.04）：柔性板经 FPC，不在位仅
+	 * 打印 ABSENT 不算故障（temp_sensor.c 返回值 1） */
+	if (temp_bringup_test() < 0) {
+		printk("WARN,temp_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_SD_TEST
+	/* 4.7 SD NAND 自检（task-V1.04）：disk 初始化 + FATFS 读写比对；
+	 * 无文件系统的裸卡会被格式化（bring-up 阶段允许） */
+	if (sd_bringup_test() != 0) {
+		printk("WARN,sd_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_MIC_TEST
+	/* 4.8 双 PDM 麦自检（task-V1.04）：2s 采集 + 左右声道 RMS/峰值 */
+	if (mic_bringup_test() != 0) {
+		printk("WARN,mic_bringup_failed\n");
+	}
+#endif
+
 #if CONFIG_APP_BOOT_LED_INDICATION
 	/* 5. 就绪指示：LED0+LED1 同闪 3 秒（自检通过的一次性确认） */
 	ret = status_led_blink(true, true, INDICATION_MS,
@@ -581,6 +614,9 @@ int main(void)
 	       "hold_3s=release_to_ship_red_blue\n");
 
 	/* 8. 主循环：20ms 周期轮询处理 */
+	int64_t last_temp_ms = -1000;
+	int temp_print_div = 0;
+
 	while (true) {
 		int64_t now_ms = k_uptime_get();
 
@@ -590,6 +626,22 @@ int main(void)
 		if ((ret != 0) && (app_state != APP_STATE_FAULT)) {
 			enter_fault("led_update", ret);
 		}
+		/* 温度 1Hz 读取 + BLE 通知（TMP112 U2；ABSENT 时静默跳过） */
+#if CONFIG_APP_TEMP_TEST
+		if ((now_ms - last_temp_ms) >= 1000) {
+			last_temp_ms = now_ms;
+			int32_t mdeg;
+
+			if (temp_read_mdeg(&mdeg) == 0) {
+				ble_imu_service_notify_temp(mdeg);
+				if ((temp_print_div++ % 10) == 0) {
+					printk("TEMP,now=%d.%02dC\n",
+					       (int)(mdeg / 1000),
+					       (int)((mdeg % 1000) / 10));
+				}
+			}
+		}
+#endif
 #if CONFIG_APP_POWER_DOMAIN_TEST_MB
 		test_mailbox_poll();            /* SWD 测试邮箱命令 */
 #endif

@@ -40,4 +40,7 @@
  */
 int ble_imu_service_init(void);
 
+/** 温度通知（mdeg=毫°C）。未连接 -ENOTCONN；未订阅温度 CCC -EACCES */
+int ble_imu_service_notify_temp(int32_t mdeg);
+
 #endif /* BLE_IMU_SERVICE_H */

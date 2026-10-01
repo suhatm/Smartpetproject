@@ -176,5 +176,27 @@ config APP_WATCHDOG_TIMEOUT_SEC
 	  30s 对宠物环够用；若调试期嫌复位烦可调大或临时关掉
 	  APP_HW_WATCHDOG。
 
+config APP_TEMP_TEST
+	bool "TMP112 temperature bring-up self-test"
+	default y
+	help
+	  task-V1.04：柔性板 U2 TMP112A（SENS_I2C @0x48）读温自检。
+	  FPC 未插时报告 ABSENT 不算失败。
+
+config APP_SD_TEST
+	bool "SD NAND (CSNP1GCR01) bring-up self-test"
+	default y
+	help
+	  task-V1.04：U12 SD NAND（spi00 + SD 2.0 SPI 模式）自检：
+	  disk 初始化 → 容量 → FATFS 挂载（失败则格式化）→ 文件读写比对。
+	  注意：卡上无文件系统时会被格式化（清卡）。
+
+config APP_MIC_TEST
+	bool "Dual IM69D128 PDM mic bring-up self-test"
+	default y
+	help
+	  task-V1.04：U5/U6 PDM 双麦（pdm20，CLK=P1.12/DIN=P1.10，
+	  立体声分时隙）采集 2s 并计算左右声道 RMS/峰值。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"
