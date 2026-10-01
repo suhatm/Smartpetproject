@@ -44,5 +44,159 @@ config APP_LED_INDICATION_MS
 	help
 	  开机/关机/就绪指示图案的持续时长（默认 3 秒）。
 
+config APP_HEARTBEAT_LED
+	bool "Heartbeat LED indication during normal operation"
+	default y
+	help
+	  正常工作（ACTIVE）期间的心跳指示：LED0+LED1 同时快闪一下，
+	  周期与时长可配（APP_HEARTBEAT_PERIOD_MS / APP_HEARTBEAT_FLASH_MS）。
+	  用于"设备正在工作"的持续可见指示；关闭后正常工作期间灯全灭
+	  （最省电）。注意：心跳指示与省电存在权衡，默认开启满足
+	  "正常工作可见"的产品需求，量产可按需关闭。
+
+config APP_HEARTBEAT_PERIOD_MS
+	int "Heartbeat period (ms)"
+	default 5000
+	range 1000 60000
+	depends on APP_HEARTBEAT_LED
+	help
+	  心跳指示的重复周期（默认每 5 秒闪一次）。
+
+config APP_HEARTBEAT_FLASH_MS
+	int "Heartbeat flash duration (ms)"
+	default 100
+	range 20 500
+	depends on APP_HEARTBEAT_LED
+	help
+	  心跳单次闪烁的点亮时长（默认 100 ms，双灯同亮）。
+
+config APP_IMU_TEST
+	bool "IMU (U4 LSM6DSV16X) I2C bring-up self-test"
+	default y
+	help
+	  IMU 连通性自检（task-V1.03，docs/IMU采集测试方案.md）：
+	  NFC pad 归还（P1.02/P1.03 -> GPIO，NFCT.PADCONFIG 运行时写 0）、
+	  VDD_SENS_3V0 上电、SENS_I2C（i2c21）总线扫描、
+	  U4 WHO_AM_I 校验（0x0F，期望 0x70，两个候选地址 0x6A/0x6B）。
+	  自检完成后 SENS 电源域下电，结果经 RTT 打印 IMU_TEST,summary。
+	  量产固件可关闭以缩短开机时间。
+
+config APP_POWER_DOMAIN_TEST_MB
+	bool "SWD test mailbox for power domain control (host tool)"
+	default y
+	help
+	  SWD 测试邮箱：上位机（tools/power_domain_test.py）经调试器
+	  直接读写 RAM 邮箱（符号 power_test_mb，地址见 zephyr.map），
+	  下发三电源域独立开关命令（SENS/STORE/ANA 单独开、关、
+	  全开、全关、状态查询）。仅调试用，量产固件应关闭。
+
+config APP_BLE_LED_TEST
+	bool "BLE peripheral LED control test service (nRF Connect App)"
+	depends on BT
+	default y
+	help
+	  蓝牙从机 LED 测试服务（docs/蓝牙驱动测试方案.md，task-V1.02）：
+	  广播名 SmartPet，自定义 GATT 服务
+	  e5a00001-1e5c-4b8f-9a2d-6c0f7e8d9a0b，特征值 e5a00002
+	  （Read/Write，1 字节位图：bit0=LED0红 bit1=LED1蓝）。
+	  手机 nRF Connect App 连接后可控制两灯开关。
+	  不影响原有 LED 状态机：BLE 显示层优先级低于故障/按键/充电，
+	  仅在 ACTIVE 空闲态覆盖心跳层；断开连接自动清除。
+	  注意：量产固件应置 n（省电；且当前免配对明文写入有安全风险）。
+
+config APP_BLE_IMU_STREAM
+	bool "BLE peripheral IMU data stream service (nRF Connect App)"
+	depends on BT && SENSOR
+	default y
+	help
+	  蓝牙从机 IMU 数据流服务（task-V1.03，docs/IMU采集测试方案.md §4）：
+	  自定义 GATT 服务 e5a00010-1e5c-4b8f-9a2d-6c0f7e8d9a0b，
+	  数据流特征值 e5a00011（Read/Notify，[seq][cnt][N×12B 帧]，
+	  accel=mg / gyro=dps×10，MTU 自适应最多 20 帧/包）、
+	  控制点 e5a00012（Read/Write，0x01 启动 / 0x00 停止）。
+	  采集通路：U4 st,lsm6dsv16x 驱动（deferred-init，上电后手动
+	  device_init）+ INT1(P0.00) drdy 触发（失败降级 33ms 轮询）
+	  + 64 帧 k_msgq 环形缓冲 + 50ms 打包 notify。
+	  断开连接自动停止采集。量产固件应置 n（省电 + 明文无安全）。
+
+config APP_IMU_AUTOSTART
+	bool "Auto-start IMU stream on BLE connect"
+	depends on APP_BLE_IMU_STREAM
+	default y
+	help
+	  连接即自动开始采集（断开自动停止）。
+
+	  为什么默认开：控制点 e5a00012（写 0x01）和 Notify 订阅是两步操作，
+	  而手机 App 上"先订阅还是先写控制点"的顺序很容易踩坑——
+	  实测 nRF Connect for Mobile 上出现过"订阅(CCC=0x0001)后紧接着被
+	  取消(CCC=0x0000)"（用户以为没反应就再点了一次下载箭头），
+	  结果是采集在跑、数据全被丢（frames=64,dropped=11122），
+	  手机端什么都看不到。自动开流后，App 只需订阅通知这一步即可见数据。
+
+	  代价：连接期间持续 30Hz 采样（约 0.5 mA 量级），断电由断开自动停止
+	  兜底。量产可按功耗预算置 n，保留控制点显式启停。
+
+config APP_BLE_IDLE_TIMEOUT_SEC
+	int "BLE zombie-connection idle timeout (seconds, 0 = disabled)"
+	depends on APP_BLE_IMU_STREAM
+	default 120
+	range 0 3600
+	help
+	  僵尸连接看门狗：连接后若【未订阅 Notify】且持续该时长没有任何
+	  读/写/订阅操作，固件主动断开并重新广播。
+
+	  背景：BLE 链路层监督超时（prj.conf 当前 0.42s）只能救"手机走远/
+	  关蓝牙"；若手机 App 被直接杀死而系统蓝牙仍开着、且设备在通信
+	  范围内，链路层 PDUs 一直正常交换，监督超时永不触发——板子停在
+	  "已连接"状态不再广播，任何新设备都搜不到（2026-10-01 手机与
+	  电脑端均实测复现，只能重新上电/复位恢复）。
+
+	  判定刻意保守：订阅中的活跃连接永不断开；任何一次读特征值、
+	  写控制点、订阅/取消订阅都会刷新活动时间戳。置 0 禁用。
+
+config APP_HW_WATCHDOG
+	bool "Hardware watchdog (wdt31) as last-resort hang recovery"
+	default y
+	help
+	  硬件看门狗兜底（详见 src/hardware/app_watchdog.h 注释）：
+	  2026-10-01 SWD 实锤，手机断开连接瞬间 Nordic MPSL 私有工作
+	  队列线程（协作优先级 -10）在闭源库内部死锁，饿死 sysworkq
+	  （广播重启 work 永不执行）与 main 线程——板子"不广播、无
+	  日志"假死，只能重新上电。应用层看门狗对高优先级线程挂死
+	  无能为力，唯一可靠兜底是硬件复位。main 主循环（20ms）喂狗，
+	  调试器 halt 时自动暂停计数（WDT_OPT_PAUSE_HALTED_BY_DBG）。
+
+config APP_WATCHDOG_TIMEOUT_SEC
+	int "Hardware watchdog timeout (seconds)"
+	depends on APP_HW_WATCHDOG
+	default 30
+	range 5 600
+	help
+	  看门狗超时：挂死后最长的假死时间（复位 + 重启约 1~2s）。
+	  30s 对宠物环够用；若调试期嫌复位烦可调大或临时关掉
+	  APP_HW_WATCHDOG。
+
+config APP_TEMP_TEST
+	bool "TMP112 temperature bring-up self-test"
+	default y
+	help
+	  task-V1.04：柔性板 U2 TMP112A（SENS_I2C @0x48）读温自检。
+	  FPC 未插时报告 ABSENT 不算失败。
+
+config APP_SD_TEST
+	bool "SD NAND (CSNP1GCR01) bring-up self-test"
+	default y
+	help
+	  task-V1.04：U12 SD NAND（spi00 + SD 2.0 SPI 模式）自检：
+	  disk 初始化 → 容量 → FATFS 挂载（失败则格式化）→ 文件读写比对。
+	  注意：卡上无文件系统时会被格式化（清卡）。
+
+config APP_MIC_TEST
+	bool "Dual IM69D128 PDM mic bring-up self-test"
+	default y
+	help
+	  task-V1.04：U5/U6 PDM 双麦（pdm20，CLK=P1.12/DIN=P1.10，
+	  立体声分时隙）采集 2s 并计算左右声道 RMS/峰值。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"

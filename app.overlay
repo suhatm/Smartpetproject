@@ -1,6 +1,8 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/sensor/lsm6dsv16x.h>
+#include <zephyr/dt-bindings/sensor/lsm6dsvxxx.h>
 
 /*
  * LIHAObohuan 宠物环主板（fubenxiangmu）电源/开关机/LED 设备树
@@ -20,10 +22,14 @@
 };
 
 /*
- * P1.02/P1.03 复位后默认 NFC 功能；后续用作 SENS_I2C，
- * 先在 UICR 中归还为 GPIO（当前电源 UI 暂不启用 i2c21）。
+ * P1.02/P1.03 复位后默认为 NFC 天线 pad（NFCT.PADCONFIG 复位值 0x1=Enabled，
+ * 且每次复位重新加载）。nRF54L 的归还机制与 nRF52 不同：
+ *   - nRF52：UICR.NFCPINS（本芯片 UICR 无此寄存器）
+ *   - nRF54L：运行时直接写 NFCT.PADCONFIG=0 即可归还为 GPIO，无需重启
+ * 实际归还动作在 src/hardware/imu_sensor.c 的 PRE_KERNEL_1 初始化中完成，
+ * 必须早于 i2c21 TWIM 的 pinctrl 应用。
  */
-&uicr {
+&nfct {
 	nfct-pins-as-gpios;
 };
 
@@ -86,4 +92,153 @@
 &hfxo {
 	load-capacitors = "internal";
 	load-capacitance-femtofarad = <8000>;
+};
+
+/*
+ * SENS_I2C（task-V1.03 IMU 采集）：P1.02=SDA / P1.03=SCL，4.7kΩ 上拉（R2/R4）。
+ * 总线挂载：主板 U4 LSM6DSV16XTR（地址由 R6 0Ω 设 SA0）+
+ * FPC1 柔性板（LSM6DSV16X + TMP112，地址由各自 0Ω 电阻区分）。
+ * 400kHz Fast Mode：FIFO 批量读需要带宽余量。
+ */
+&pinctrl {
+	pet_sens_i2c21_default: pet_sens_i2c21_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 2)>,
+				<NRF_PSEL(TWIM_SCL, 1, 3)>;
+		};
+	};
+
+	pet_sens_i2c21_sleep: pet_sens_i2c21_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 2)>,
+				<NRF_PSEL(TWIM_SCL, 1, 3)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c21 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&pet_sens_i2c21_default>;
+	pinctrl-1 = <&pet_sens_i2c21_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/*
+	 * 主板 IMU U4（LSM6DSV16XTR，task-V1.03 第二步）：
+	 *   - 地址 0x6B：2026-10-01 板测实锤（R6 SA0=1 方向）
+	 *   - zephyr,deferred-init：VDD_SENS_3V0（nPM1300 LDSW1）默认关闭，
+	 *     驱动若在 POST_KERNEL 自动初始化会在无电状态下 whoami 失败；
+	 *     改为上电后由 imu_stream.c 手动 device_init()
+	 *   - INT1→P0.00（IMU_REF_INT1），drdy 触发采样
+	 *   - 量程：±8g / 2000dps（宠物甩头奔跑场景，方案 §2）
+	 *   - ODR 30Hz：BLE 传输与功耗平衡（后续经控制点可调）
+	 */
+	imu_u4: lsm6dsv16x@6b {
+		compatible = "st,lsm6dsv16x";
+		reg = <0x6b>;
+		zephyr,deferred-init;
+		accel-odr = <LSM6DSVXXX_DT_ODR_AT_30Hz>;
+		accel-range = <LSM6DSV16X_DT_FS_8G>;
+		gyro-odr = <LSM6DSVXXX_DT_ODR_AT_30Hz>;
+		gyro-range = <LSM6DSV16X_DT_FS_2000DPS>;
+		int1-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+		drdy-pin = <1>;
+		status = "okay";
+	};
+
+	/*
+	 * 柔性板 U2 TMP112A 温度传感器（task-V1.04）：
+	 *   - 地址 0x48：ADD0 接地（原理图 P1 页）
+	 *   - zephyr,deferred-init：同 IMU，VDD_SENS 上电后手动 device_init
+	 *   - ALERT 接地未用，仅轮询读温
+	 *   - 经 FPC 在柔性板上，未插排线时扫描不到属预期（ABSENT 非故障）
+	 */
+	temp_u2: tmp112@48 {
+		compatible = "ti,tmp112";
+		reg = <0x48>;
+		zephyr,deferred-init;
+		status = "okay";
+	};
+};
+
+/*
+ * SD NAND 存储 U12 CSNP1GCR01-BOW（task-V1.04，1Gb=128MB，SD 2.0 SPI 模式）：
+ *   SCK=P2.01(经R27 33Ω) MOSI=P2.02 MISO=P2.04 CS=P2.05(R26 47k上拉)
+ * 用 spi00（32MHz 高速域，P2 引脚配对；spi20-23 上限 8MHz）。
+ * 初期保守 8MHz，稳定后可提频。电源 VDD_STORE_3V0_SW 由 PMIC LDO2 门控，
+ * 测试前需 power_domain_set(POWER_DOMAIN_STORE, true)。
+ */
+&pinctrl {
+	pet_sd_spi00_default: pet_sd_spi00_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+		};
+	};
+
+	pet_sd_spi00_sleep: pet_sd_spi00_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi00 {
+	status = "okay";
+	pinctrl-0 = <&pet_sd_spi00_default>;
+	pinctrl-1 = <&pet_sd_spi00_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+
+	sdcard@0 {
+		compatible = "zephyr,sdhc-spi-slot";
+		reg = <0>;
+		status = "okay";
+		spi-max-frequency = <8000000>;
+
+		sdmmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};
+
+/*
+ * 双 PDM 麦克风 U5/U6 IM69D128（task-V1.04，立体声分时隙）：
+ *   CLK=P1.12 共享；DATA 各经 100Ω 汇至 DIN=P1.10
+ *   U5 LR select=VDD（右时隙），U6 LR select=GND（左时隙）
+ * 与 Zephyr dmic 示例 bl54l15_dvk 同款接法（CLK 恰同 P1.12）。
+ */
+&pinctrl {
+	pet_mic_pdm20_default: pet_mic_pdm20_default {
+		group1 {
+			psels = <NRF_PSEL(PDM_CLK, 1, 12)>,
+				<NRF_PSEL(PDM_DIN, 1, 10)>;
+		};
+	};
+};
+
+dmic_dev: &pdm20 {
+	status = "okay";
+	pinctrl-0 = <&pet_mic_pdm20_default>;
+	pinctrl-names = "default";
+	clock-source = "PCLK32M";
+};
+
+/*
+ * 硬件看门狗（2026-10-01 SWD 实锤 MPSL 库死锁后加入）：
+ * 手机断开瞬间 Nordic MPSL 私有工作队列（协作优先级 -10）曾在
+ * 闭源库内部死锁，饿死 sysworkq/main 线程——板子"不广播、无日志"
+ * 假死。wdt31 兜底：main 主循环 20ms 喂狗，超时 30s 复位恢复广播。
+ * wdt30 硬件固定为 Secure 侧，应用不可用，故用 wdt31。
+ */
+&wdt31 {
+	status = "okay";
 };
