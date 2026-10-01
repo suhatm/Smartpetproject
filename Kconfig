@@ -104,5 +104,20 @@ config APP_BLE_LED_TEST
 	  仅在 ACTIVE 空闲态覆盖心跳层；断开连接自动清除。
 	  注意：量产固件应置 n（省电；且当前免配对明文写入有安全风险）。
 
+config APP_BLE_IMU_STREAM
+	bool "BLE peripheral IMU data stream service (nRF Connect App)"
+	depends on BT && SENSOR
+	default y
+	help
+	  蓝牙从机 IMU 数据流服务（task-V1.03，docs/IMU采集测试方案.md §4）：
+	  自定义 GATT 服务 e5a00010-1e5c-4b8f-9a2d-6c0f7e8d9a0b，
+	  数据流特征值 e5a00011（Read/Notify，[seq][cnt][N×12B 帧]，
+	  accel=mg / gyro=dps×10，MTU 自适应最多 20 帧/包）、
+	  控制点 e5a00012（Read/Write，0x01 启动 / 0x00 停止）。
+	  采集通路：U4 st,lsm6dsv16x 驱动（deferred-init，上电后手动
+	  device_init）+ INT1(P0.00) drdy 触发（失败降级 33ms 轮询）
+	  + 64 帧 k_msgq 环形缓冲 + 50ms 打包 notify。
+	  断开连接自动停止采集。量产固件应置 n（省电 + 明文无安全）。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"

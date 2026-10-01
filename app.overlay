@@ -1,6 +1,8 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/sensor/lsm6dsv16x.h>
+#include <zephyr/dt-bindings/sensor/lsm6dsvxxx.h>
 
 /*
  * LIHAObohuan 宠物环主板（fubenxiangmu）电源/开关机/LED 设备树
@@ -124,8 +126,25 @@
 	pinctrl-names = "default", "sleep";
 
 	/*
-	 * 主板 IMU U4：bring-up 阶段先不挂 sensor 驱动节点，
-	 * 由 imu_sensor.c 用裸 I2C 做 WHO_AM_I 自检；
-	 * 验证通过后（task-V1.03 第二步）改为标准 st,lsm6dsv16x 节点。
+	 * 主板 IMU U4（LSM6DSV16XTR，task-V1.03 第二步）：
+	 *   - 地址 0x6B：2026-10-01 板测实锤（R6 SA0=1 方向）
+	 *   - zephyr,deferred-init：VDD_SENS_3V0（nPM1300 LDSW1）默认关闭，
+	 *     驱动若在 POST_KERNEL 自动初始化会在无电状态下 whoami 失败；
+	 *     改为上电后由 imu_stream.c 手动 device_init()
+	 *   - INT1→P0.00（IMU_REF_INT1），drdy 触发采样
+	 *   - 量程：±8g / 2000dps（宠物甩头奔跑场景，方案 §2）
+	 *   - ODR 30Hz：BLE 传输与功耗平衡（后续经控制点可调）
 	 */
+	imu_u4: lsm6dsv16x@6b {
+		compatible = "st,lsm6dsv16x";
+		reg = <0x6b>;
+		zephyr,deferred-init;
+		accel-odr = <LSM6DSVXXX_DT_ODR_AT_30Hz>;
+		accel-range = <LSM6DSV16X_DT_FS_8G>;
+		gyro-odr = <LSM6DSVXXX_DT_ODR_AT_30Hz>;
+		gyro-range = <LSM6DSV16X_DT_FS_2000DPS>;
+		int1-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+		drdy-pin = <1>;
+		status = "okay";
+	};
 };

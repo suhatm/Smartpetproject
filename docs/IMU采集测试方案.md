@@ -55,18 +55,63 @@ IMU_TEST,summary,PASS,devices=2,failures=0
   再查 R6 焊接、FPC 是否插好
 - `whoami=FAIL` 但 scan 有 ACK：地址冲突或挂的不是 LSM6DSV16X，读 MISMATCH 行的 id 值定位
 
-## 4. 第二步：GATT 数据流（规划，待第一步上板验证后实施）
+## 4. 第二步：GATT 数据流（已实现，2026-10-01）
 
-- 设备树：`st,lsm6dsv16x` 节点挂 i2c21（accel ±8g / 30Hz，gyro 2000dps / 30Hz）
-- 数据通路：INT1（P0.00）FIFO watermark 中断 → TWIM 批量读 → 环形缓冲 → Notification
-- GATT 服务：`e5a00010`（Notify 数据 `e5a00011`，Write 控制点 `e5a00012`），
-  帧格式 `[seq:1B][cnt:1B][6×int16 ×N]`，MTU 247
-- 功耗：日常 gyro 关（accel 低功耗 30Hz 约 12µA），连接间隔 45~60ms
+### 4.1 实现（与最初规划的差异说明）
 
-## 5. 变更清单（task-V1.03 第一步）
+- 设备树：`st,lsm6dsv16x@6b` 挂 i2c21（accel ±8g / 30Hz，gyro 2000dps / 30Hz），
+  标记 `zephyr,deferred-init`——VDD_SENS_3V0 复位后默认关闭，驱动若在
+  POST_KERNEL 自动初始化会在无电状态下 whoami 失败；改为上电后由
+  `imu_stream_start()` 手动 `device_init()`
+- 数据通路（MVP 简化）：INT1（P0.00）drdy 触发 → `sensor_sample_fetch`
+  单帧读 → 64 帧 `k_msgq` 环形缓冲 → 50ms 打包 notify。
+  未用 FIFO watermark 批量读（那需要 SENSOR_ASYNC_API/RTIO 流式，栈开销大，
+  30Hz 单帧读完全无压力）；高 ODR 场景再升级
+- 触发失败自动降级 33ms 定时轮询（自制板 INT 走线兜底），RTT 日志可辨
+- GATT：Service `e5a00010`；数据流 `e5a00011`（Read+Notify）；
+  控制点 `e5a00012`（Read+Write，0x01 启动 / 0x00 停止）
+- 帧格式（小端）：`[seq:1B][cnt:1B][cnt×12B]`，帧 = ax,ay,az（mg int16）
+  + gx,gy,gz（dps×10 int16）；MTU 247 时 20 帧/包，未请求大 MTU 自动缩包
+- 断开连接自动停止采集（省电 + 防孤儿流）
+
+### 4.2 App 操作步骤（nRF Connect for Mobile）
+
+1. 连接广播名 **SmartPet**
+2. （建议）右上角 Connect 设置里勾选 Request MTU 247 或在连接后手动
+   Request MTU（新版 App 默认自动请求大 MTU）
+3. 展开未知服务 `e5a00010-...`，对 `e5a00011` 点击 **Enable Notify**
+4. 对 `e5a00012` 写入 `01`（Write → 单字节）
+5. `e5a00011` 应开始持续收到数据包；读 `e5a00011` 可查 3 字节状态
+   `[active][src:1=trigger 2=polling][seq]`
+6. 停止：写 `00` 到 `e5a00012`，或直接断开连接
+
+### 4.3 RTT 日志关键字
+
+- `IMU_BLE,ccc,value=0x0001,notify_on`：App 订阅成功
+- `IMU_BLE,ctrl_cmd=1` / `IMU_BLE,start_rc=0`：启动命令与结果
+- `IMU_STREAM,started,src=trigger,odr=30Hz,fs=8g|2000dps`：触发模式启动
+- `IMU_STREAM,started,src=polling,period_ms=33`：降级轮询（INT 有问题）
+- `IMU_STREAM,stopped,frames=N,dropped=M,errors=K`：停止统计
+- `IMU_BLE,notify_rc=-12`：ACL TX 缓冲耗尽丢包（偶发正常，持续出现调大
+  `CONFIG_BT_CONN_TX_MAX` 或降低打包频率）
+
+## 5. 变更清单（task-V1.03）
+
+### 第一步（commit 8183554）
 
 - `app.overlay`：+i2c21（400kHz，pinctrl P1.02/P1.03），&uicr 改 &nfct 标注
 - `src/hardware/imu_sensor.c/h`：NFC pad 归还 + 连通性自检
 - `src/app/main.c`：启动序列插入 4.5 步自检（失败不阻断启动）
 - `Kconfig`：+APP_IMU_TEST
 - `CMakeLists.txt`：+imu_sensor.c
+
+### 第二步（本次）
+
+- `app.overlay`：+imu_u4 节点（st,lsm6dsv16x@6b，deferred-init，INT1→P0.00）
+- `src/hardware/imu_stream.c/h`（新）：上电→device_init→drdy 触发→
+  k_msgq 缓冲，轮询兜底
+- `src/bluetooth/ble_imu_service.c/h`（新）：e5a00010 服务 + 50ms 打包
+  notify（MTU 自适应）+ 断开自动停
+- `prj.conf`：+SENSOR/LSM6DSV16X 驱动、trigger global-thread、BT MTU 247
+- `Kconfig`：+APP_BLE_IMU_STREAM；`CMakeLists.txt`：+两个新源文件
+- 板测第一步已 PASS（U4@0x6B，WHO_AM_I=0x70）
