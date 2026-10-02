@@ -45,9 +45,16 @@
 /* STATUS_REG 位掩码 */
 #define STATUS_AH_QVARDA            0x08U
 
-/* CTRL1/CTRL2 的 ODR 位段（高 4 位；0 = power-down） */
-#define CTRL_ODR_MASK               0xF0U
+/* CTRL1/CTRL2 的 ODR 位段（上板实锤：LSM6DSV16X 的 odr_xl/odr_g 在**低 4 位**，
+ * bit3:0=odr、bit6:4=op_mode、bit7 保留——与 LSM6DSO 等老型号"高 4 位 ODR"
+ * 布局不同，误用 0xF0 掩码会把值写进 op_mode 且 ODR 恒为 0）。
+ * 0 = power-down。 */
+#define CTRL_ODR_MASK               0x0FU
 #define CTRL_ODR_POWERDOWN          0x00U
+
+/* XL ODR 编码（pid 驱动 lsm6dsv16x_data_rate_t 实锤：30Hz=0x4，低 4 位）。
+ * QVAR 数据率跟随 ODR_XL：XL power-down 时 ah_qvarda 永不置位。 */
+#define CTRL1_ODR_XL_30HZ           0x04U
 
 /* 通道 → I2C 地址映射：U1 柔性板 0x6A（QVAR-A），U4 主板 0x6B（QVAR-B） */
 #define QVAR_A_I2C_ADDR             0x6AU
@@ -186,7 +193,17 @@ int qvar_channel_enable(enum qvar_channel ch, enum qvar_zin zin)
 		goto io_fail;
 	}
 
-	/* 4. 恢复 XL/G ODR（QVAR 与六轴可并行输出，ah_qvarda 随 XL drdy） */
+	/* 4. 恢复 XL/G ODR（QVAR 与六轴可并行输出，ah_qvarda 随 XL drdy）。
+	 * 上板实锤的坑：若本模块先于 Zephyr sensor 驱动 device_init 运行
+	 * （开机自检阶段），保存的 CTRL1 ODR=0（deferred-init 未配置），
+	 * "恢复原值"等于让 XL 继续停摆 → QVAR 永无数据。此时主动给 XL
+	 * 配 30Hz（仅 ODR 位段，FS 等低位保持原样；驱动后续 init 会
+	 * 按 overlay 全量重配，不冲突）。gyro 不强制开启（省功耗）。 */
+	if ((ctrl1 & CTRL_ODR_MASK) == CTRL_ODR_POWERDOWN) {
+		ctrl1 = (ctrl1 & ~CTRL_ODR_MASK) | CTRL1_ODR_XL_30HZ;
+		printk("QVAR,%s,xl_odr_was_powerdown,force_30hz\n",
+		       ch == QVAR_CHANNEL_A ? "A" : "B");
+	}
 	ret = qvar_reg_write(addr, LSM6DSV16X_REG_CTRL1, ctrl1);
 	if (ret == 0) {
 		ret = qvar_reg_write(addr, LSM6DSV16X_REG_CTRL2, ctrl2);
@@ -304,7 +321,18 @@ int qvar_bringup_test(void)
 			       name, got, raw);
 			active_cnt++;
 		} else {
-			printk("QVAR_TEST,%s,fail,no_data\n", name);
+			/* no_data 诊断：dump 关键寄存器一次看全——
+			 * CTRL1/2 低 4 位为 ODR（0x4=30Hz），CTRL7 应含 0x80，
+			 * STATUS bit0(xlda)/bit3(ah_qvarda) 反映 XL 与 QVAR 链活性 */
+			uint8_t c1 = 0, c2 = 0, c7 = 0, st = 0;
+			uint16_t a = qvar_addr_of(ch);
+
+			qvar_reg_read(a, LSM6DSV16X_REG_CTRL1, &c1, 1);
+			qvar_reg_read(a, LSM6DSV16X_REG_CTRL2, &c2, 1);
+			qvar_reg_read(a, LSM6DSV16X_REG_CTRL7, &c7, 1);
+			qvar_reg_read(a, LSM6DSV16X_REG_STATUS, &st, 1);
+			printk("QVAR_TEST,%s,fail,no_data,ctrl1=0x%02x,ctrl2=0x%02x,"
+			       "ctrl7=0x%02x,status=0x%02x\n", name, c1, c2, c7, st);
 			qvar_set_state(ch, QVAR_CH_DEGRADED);
 		}
 	}

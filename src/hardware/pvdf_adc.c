@@ -42,8 +42,8 @@
 #define VBIAS_MIN_MV    1200
 #define VBIAS_MAX_MV    1800
 
-/** ADC 满量程（gain 1/6 × 0.6V ref → 3.6V），用于合理性检查 */
-#define ADC_FULL_SCALE_MV 3600
+/** ADC 满量程（nRF54L15：gain 2/7 × 内部 0.9V 基准 → 3.15V），用于合理性检查 */
+#define ADC_FULL_SCALE_MV 3150
 
 static const struct device *const adc_dev = DEVICE_DT_GET(PVDF_ADC_NODE);
 

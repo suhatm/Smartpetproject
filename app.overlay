@@ -280,7 +280,9 @@ dmic_dev: &pdm20 {
  *   ADC_REF   = P1.14/AIN7  VBIAS 虚地监测（CH1 缓冲，R14 1k，≈VDD_ANA/2=1.5V）
  * 电源 VDD_ANA_3V0 由 ANA_EN(P1.06) 门控（U10 TPS7A2030），
  * 读取前需 power_domain_set(POWER_DOMAIN_ANALOG, true)，见 pvdf_adc.c。
- * 增益 1/6 + 内部 0.6V 基准 → 满量程 3.6V，覆盖 VDD_ANA_3V0 全摆幅。
+ * nRF54L15 SAADC：增益 2/7 + 内部 0.9V 基准 → 满量程 3.15V，覆盖 VDD_ANA_3V0 全摆幅
+ * （nRF54L gain 枚举为 2/N 系列、内部基准 0.9V，与 nRF52 的 1/N+0.6V 不同，
+ *  且 Zephyr 无 ADC_GAIN_2_8，2/7 已是可配出的最大量程）
  * 注意 P1.05/P1.13/P1.14 与 uart20 冲突已在上方禁用，SAADC 独占。
  */
 &adc {
@@ -290,7 +292,8 @@ dmic_dev: &pdm20 {
 
 	channel@0 {
 		reg = <0>;
-		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,gain = "ADC_GAIN_2_7";
+		zephyr,vref-mv = <900>;
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN1>;
@@ -299,7 +302,8 @@ dmic_dev: &pdm20 {
 
 	channel@1 {
 		reg = <1>;
-		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,gain = "ADC_GAIN_2_7";
+		zephyr,vref-mv = <900>;
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN6>;
@@ -308,7 +312,8 @@ dmic_dev: &pdm20 {
 
 	channel@2 {
 		reg = <2>;
-		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,gain = "ADC_GAIN_2_7";
+		zephyr,vref-mv = <900>;
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN7>;
