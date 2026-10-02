@@ -4,7 +4,7 @@
 宠物环传感器控制 —— 上位机 DEMO（模拟数据版，无真实 BLE）
 
 用途：评审 GUI 布局与功能集。所有数据由内置模拟器产生，
-点击"连接"后开始出数；界面元素与《宠物环传感器控制_通信协议》V0.2 一一对应。
+点击"连接"后开始出数；界面元素与《宠物环传感器控制_通信协议》V0.3 一一对应。
 
 运行：py host/petring_console_demo.py   或  host\\run_demo.bat
 （依赖标准库 tkinter：python.org 安装的系统 Python 自带；
@@ -12,6 +12,8 @@
 
 功能映射：
   连接面板      ↔ 扫描/连接/MTU/RSSI
+  电池电量      ↔ TYPE 0x08 BATTERY + CMD 0x0C GET_BATTERY + EVENT 0x02 低电
+                （数据源 nPM1300 电量计；电压/百分比/充放电态/低电告警）
   模块状态灯    ↔ MODULE_STATUS 帧 0x10（UNKNOWN/PRESENT/ABSENT/DEGRADED）
   LED 控制      ↔ CMD 0x01 LED_SET
   电源域控制    ↔ CMD 0x02 PWR_SET（单开/单关/全开/全关测试矩阵）
@@ -56,6 +58,30 @@ class SimLink:
         self.rec_channels = (True, True)             # L, R
         self.rec_file = None                          # 录完生成的 wav 路径
         self.seq = {}                                 # 每 TYPE 独立序号
+        # ---- 电池（模拟 nPM1300 电量计，协议 V0.3 TYPE 0x08 BATTERY）----
+        self.batt_mv = 4050                           # VBAT mV（3.3~4.2V 锂电）
+        self.batt_charging = False                    # 充电中标志
+        self.batt_low_warned = False                  # 低电 EVENT 去抖
+
+    BATT_EMPTY_MV, BATT_FULL_MV = 3300, 4200          # 锂电窗口
+    BATT_LOW_PCT = 15                                 # 低电告警门限 %
+
+    def batt_percent(self):
+        p = (self.batt_mv - self.BATT_EMPTY_MV) / \
+            (self.BATT_FULL_MV - self.BATT_EMPTY_MV) * 100
+        return max(0, min(100, int(p)))
+
+    def battery_sample(self, dt_s):
+        """充放电模拟：充电 +1.2mV/s，放电 -0.25mV/s（满载更快），返回
+        (vbat_mv, percent, charging)。"""
+        if self.batt_charging:
+            self.batt_mv = min(self.BATT_FULL_MV,
+                               self.batt_mv + 1.2 * dt_s)
+        else:
+            load = sum(self.pwr.values()) * 0.05 + sum(self.led) * 0.02
+            self.batt_mv = max(self.BATT_EMPTY_MV,
+                               self.batt_mv - (0.25 + load) * dt_s)
+        return int(self.batt_mv), self.batt_percent(), self.batt_charging
 
     # ---- 传感器模拟 ----
     def imu_frame(self, base_pitch):
@@ -211,9 +237,44 @@ class PetRingConsole(tk.Tk):
         self.lbl_mtu.pack(side="left", padx=(18, 6))
         self.lbl_rssi = ttk.Label(bar, text="RSSI: —")
         self.lbl_rssi.pack(side="left", padx=6)
+        # --- 电池电量（协议 V0.3 TYPE 0x08 BATTERY，源：nPM1300 电量计）---
+        batt_box = ttk.Frame(bar)
+        batt_box.pack(side="left", padx=(18, 4))
+        self.batt_canvas = tk.Canvas(batt_box, width=46, height=18,
+                                     bg=self.BG, highlightthickness=0)
+        self.batt_canvas.pack(side="left")
+        self.lbl_batt = ttk.Label(batt_box, text="—")
+        self.lbl_batt.pack(side="left", padx=(4, 2))
+        self.btn_chg = ttk.Button(batt_box, text="模拟插/拔充电器",
+                                  command=self.on_toggle_charge)
+        self.btn_chg.pack(side="left", padx=(8, 0))
         self.lbl_conn = tk.Label(bar, text="● 未连接", fg="#e74c3c",
                                  bg=self.BG, font=("微软雅黑", 11, "bold"))
         self.lbl_conn.pack(side="right")
+
+    def on_toggle_charge(self):
+        self.link.batt_charging = not self.link.batt_charging
+        self._log("INFO", "充电器 " + ("已插入，开始充电" if self.link.batt_charging
+                                       else "已拔除，电池供电"))
+
+    def _draw_battery(self, mv, pct, charging):
+        c = self.batt_canvas
+        c.delete("all")
+        # 电池外壳 + 正极头
+        c.create_rectangle(1, 3, 40, 15, outline="#9aa4ad", width=1)
+        c.create_rectangle(41, 7, 45, 11, fill="#9aa4ad")
+        # 电量填充：>50 绿 / 20~50 黄 / <20 红
+        color = "#2ecc71" if pct > 50 else ("#f1c40f" if pct > 20 else "#e74c3c")
+        fillw = int(37 * pct / 100)
+        if fillw > 0:
+            c.create_rectangle(3, 5, 3 + fillw, 13, fill=color, width=0)
+        if charging:
+            c.create_text(20, 9, text="⚡", fill="#ffffff",
+                          font=("微软雅黑", 8, "bold"))
+        state = "充电中" if charging else "放电"
+        self.lbl_batt.configure(
+            text=f"{pct}%  {mv}mV  {state}",
+            foreground=color)
 
     # ---------------- 左侧模块状态 ----------------
     def _build_left_status(self):
@@ -642,6 +703,7 @@ class PetRingConsole(tk.Tk):
             "09": "<< CMD_ACK cmd=0x09 result=0 data=[file_id=1, 10s, 32KB]",
             "0A": "<< CMD_ACK cmd=0x0A result=0（REC_READ 开始上传 → 0x07 帧流）",
             "0B": "<< CMD_ACK cmd=0x0B result=0（REC_DELETE）",
+            "0C": "<< CMD_ACK cmd=0x0C result=0 → BATTERY 帧随后到达（GET_BATTERY）",
             "10": "<< CMD_ACK cmd=0x10 result=0 → MODULE_STATUS 帧随后到达",
             "11": "<< CMD_ACK cmd=0x11 result=0 data='v1.06;task-V1.06;DEMO'",
             "7F": "<< CMD_ACK cmd=0x7F result=0 data=DE AD BE EF（回显）",
@@ -651,6 +713,21 @@ class PetRingConsole(tk.Tk):
     # ---------------- 周期刷新 ----------------
     def _tick(self):
         lk = self.link
+        # 电池电量：未连接也持续模拟充放电；连接后 2s 一帧 BATTERY 上报
+        mv, pct, chg = lk.battery_sample(0.1)
+        self._draw_battery(mv, pct, chg)
+        if lk.connected:
+            self._batt_cnt = getattr(self, "_batt_cnt", 0) + 1
+            if self._batt_cnt >= 20:
+                self._batt_cnt = 0
+                flags = (1 if chg else 0) | (4 if pct <= lk.BATT_LOW_PCT else 0)
+                self._emit_frame(0x08, struct.pack("<BHBB", 1, mv, pct, flags))
+            if pct <= lk.BATT_LOW_PCT and not lk.batt_low_warned:
+                lk.batt_low_warned = True
+                self.term_print(
+                    f"<< EVENT 0x21 id=0x02 LOW_BATTERY pct={pct}")
+            elif pct > lk.BATT_LOW_PCT + 5:
+                lk.batt_low_warned = False
         if lk.connected:
             # 六轴
             for key, pitch in (("U4", 0.0), ("U1", 1.3)):
