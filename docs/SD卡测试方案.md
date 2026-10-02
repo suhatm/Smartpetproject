@@ -52,7 +52,7 @@
 | 0x09/0x0A/0x0B | REC_LIST / REC_READ / REC_DELETE | file_id | 沿用 V0.4 已定义 |
 
 - 测试结果语义：result=0 通过；result=-5 校验失败（附错误块数）。
-- SD 不在位（MODULE_STATUS SD=ABSENT）时 SD_TEST 应答 result=-2。
+- SD 不在位（MODULE_STATUS SD=ABSENT）时 SD_TEST 应答 **result=-1**（无卡或初始化失败；-2 为挂载失败，与《原理图核对与评审建议.md》P0-2 冻结定义一致）。
 
 ## 7. 上位机 demo 操作（v0.3）
 
