@@ -33,6 +33,33 @@
 
 #include "power_control.h"
 #include "status_led.h"
+#include "app_watchdog.h"
+#include "sensor_hub_bridge.h"
+#include "ble_sensor_hub.h"
+#if CONFIG_APP_IMU_TEST
+#include "imu_sensor.h"
+#endif
+#if CONFIG_APP_TEMP_TEST
+#include "temp_sensor.h"
+#endif
+#if CONFIG_APP_SD_TEST
+#include "sd_store.h"
+#endif
+#if CONFIG_APP_MIC_TEST
+#include "mic_pdm.h"
+#endif
+#if CONFIG_APP_BODY_IMU_TEST
+#include "body_imu.h"
+#endif
+#if CONFIG_APP_QVAR_TEST
+#include "qvar_sensor.h"
+#endif
+#if CONFIG_APP_PVDF_TEST
+#include "pvdf_adc.h"
+#endif
+#if CONFIG_APP_HW_WATCHDOG
+#include <nrfx.h> /* NRF_RESET->RESETREAS（nRF54L 无 hwinfo 驱动，裸读） */
+#endif
 
 /** nPM1300 PMIC 的设备树节点 */
 #define PMIC_NODE DT_NODELABEL(npm1300_pmic)
@@ -47,6 +74,10 @@
 #define INDICATION_MS      CONFIG_APP_LED_INDICATION_MS
 /** 指示图案闪烁半周期（ms）：300 on / 300 off */
 #define BLINK_HALF_MS      CONFIG_APP_LED_BLINK_PERIOD_MS
+/** 心跳指示周期（ms）：正常工作期间每该时长双灯快闪一次 */
+#define HEARTBEAT_PERIOD_MS CONFIG_APP_HEARTBEAT_PERIOD_MS
+/** 心跳单次点亮时长（ms） */
+#define HEARTBEAT_FLASH_MS  CONFIG_APP_HEARTBEAT_FLASH_MS
 /** 电源域开关后等待生效时间（ms） */
 #define DOMAIN_SETTLE_MS   20U
 
@@ -220,6 +251,10 @@ static void request_graceful_shutdown(void)
 
 	printk("POWER_BUTTON,action=shutdown_requested\n");
 
+	/* 关机前断开蓝牙连接并停止广播（方案 §3.3）：
+	 * 蓝闪指示与进 Ship 之后设备不再对外可见 */
+	sensor_hub_shutdown();
+
 	/* 1. 关闭所有电源轨并回读校验 */
 	ret = power_domains_all_off();
 	if (ret == 0) {
@@ -355,7 +390,8 @@ static void handle_events(int64_t now_ms)
  *  - 按键按住 >=3s：红蓝同亮，提示"松手即关机"；
  *  - 按键按住 1~3s：红灯常亮，提示关机武装中；
  *  - CHARGE_ONLY：红灯 1s 周期闪烁（表示 USB 供电，非充电电流证明）；
- *  - ACTIVE：无周期图案（3 秒就绪确认在启动时一次性播完，省电）。
+ *  - ACTIVE：心跳指示——每 APP_HEARTBEAT_PERIOD_MS 双灯同亮
+ *    APP_HEARTBEAT_FLASH_MS（默认 5s/100ms，可关，见《可配置项.txt》）。
  *
  * @return 0 成功；负值 LED 驱动失败
  */
@@ -384,9 +420,27 @@ static int update_led_pattern(int64_t now_ms)
 		/* 注意：只表示 USB/仅充电模式，不代表实际充电电流 */
 		red = ((uint32_t)now_ms % 1000U) < 500U;
 	} else {
-		/* ACTIVE：无周期图案，静默运行 */
+		/* BLE LED_SET override（方案 §3.3 仲裁第 4 级，协议 LED_SET）：
+		 * 仅在 ACTIVE 且无按键/充电/故障抢占时可见，
+		 * 覆盖心跳层；断开连接后 override 自动清除回落原逻辑 */
+		uint8_t ble_mask;
+
+		if (hub_led_override_get(&ble_mask)) {
+			return status_led_set(
+				(ble_mask & 0x01U) != 0U,
+				(ble_mask & 0x02U) != 0U);
+		}
+#if CONFIG_APP_HEARTBEAT_LED
+		/* ACTIVE：心跳指示——每 HEARTBEAT_PERIOD_MS 双灯同亮 HEARTBEAT_FLASH_MS */
+		uint32_t beat = (uint32_t)now_ms % HEARTBEAT_PERIOD_MS;
+
+		red = beat < HEARTBEAT_FLASH_MS;
+		blue = red;
+#else
+		/* ACTIVE：无周期图案，静默运行（最省电） */
 		red = false;
 		blue = false;
+#endif
 	}
 
 	return status_led_set(red, blue);
@@ -411,6 +465,34 @@ int main(void)
 	printk("POWER_POLICY,wake_hold_ms=608,shutdown_hold_ms=%u,"
 	       "emergency_reset_s=10\n", SHUTDOWN_ARM_MS);
 	printk("HW_NOTE,led2_polarity_reversed_expect_no_blue\n");
+
+#if CONFIG_APP_HW_WATCHDOG
+	{
+		/*
+		 * 复位原因（RESET.RESETREAS 裸读：nRF54L 无 hwinfo 驱动）。
+		 * 看门狗复位（DOG0/DOG1）会在此留痕——WDT 兜底触发的自愈
+		 * 在日志上可辨识，不与正常上电混淆。
+		 */
+		uint32_t cause = NRF_RESET->RESETREAS;
+
+		printk("RESET,cause=0x%08x%s%s%s%s%s\n", cause,
+		       (cause & RESET_RESETREAS_DOG0_Msk) ? ",wdt0" : "",
+		       (cause & RESET_RESETREAS_DOG1_Msk) ? ",wdt31" : "",
+		       (cause & RESET_RESETREAS_RESETPIN_Msk) ? ",pin" : "",
+		       (cause & RESET_RESETREAS_CTRLAPSOFT_Msk) ? ",ctrl_soft" : "",
+		       (cause & RESET_RESETREAS_CTRLAPHARD_Msk) ? ",ctrl_hard" : "");
+		/* 看门狗复位原因留给 bridge：上位机订阅后经 EVENT 0x02 上报 */
+		if (cause & (RESET_RESETREAS_DOG0_Msk | RESET_RESETREAS_DOG1_Msk)) {
+			sensor_hub_bridge_report_wdt_reset(cause);
+		}
+		/* 写 1 清除，避免下次启动重复报告 */
+		NRF_RESET->RESETREAS = cause;
+	}
+#endif
+
+	/* 0. 尽早武装硬件看门狗：覆盖后面所有初始化与运行期；
+	 * main 主循环喂狗（20ms/拍），任何线程/闭源库挂死 -> 复位恢复 */
+	(void)app_watchdog_init();
 
 	/* 1. 检查 PMIC 是否就绪 */
 	if (!device_is_ready(pmic)) {
@@ -441,6 +523,62 @@ int main(void)
 #if CONFIG_APP_POWER_DOMAIN_SELFTEST
 	/* 4. 三路电源域独立控制自检（SENS/STORE/ANALOG 逐一开关校验） */
 	(void)power_domain_selftest();
+#endif
+
+#if CONFIG_APP_IMU_TEST
+	/* 4.5 IMU 连通性自检（task-V1.03）：NFC pad 归还复核 + i2c21 扫描
+	 * + U4 WHO_AM_I 校验；失败仅打印 FAIL 不阻断启动（同 BLE 策略），
+	 * 便于把电源 UI 主流程与 IMU 问题分开定位。 */
+	if (imu_bringup_test() != 0) {
+		printk("WARN,imu_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_TEMP_TEST
+	/* 4.6 TMP112 温度自检（task-V1.04）：柔性板经 FPC，不在位仅
+	 * 打印 ABSENT 不算故障（temp_sensor.c 返回值 1） */
+	if (temp_bringup_test() < 0) {
+		printk("WARN,temp_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_SD_TEST
+	/* 4.7 SD NAND 自检（task-V1.04）：disk 初始化 + FATFS 读写比对；
+	 * 无文件系统的裸卡会被格式化（bring-up 阶段允许） */
+	if (sd_bringup_test() != 0) {
+		printk("WARN,sd_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_MIC_TEST
+	/* 4.8 双 PDM 麦自检（task-V1.04）：2s 采集 + 左右声道 RMS/峰值 */
+	if (mic_bringup_test() != 0) {
+		printk("WARN,mic_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_BODY_IMU_TEST
+	/* 4.9 柔性板 U1 IMU 自检（task-V1.05）：FPC 未插 ABSENT 非故障，
+	 * 返回 1 时仅打印告警，系统继续正常运行（硬件接入后即可用） */
+	if (body_imu_bringup_test() < 0) {
+		printk("WARN,body_imu_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_QVAR_TEST
+	/* 4.10 QVAR-A/B 通道自检（task-V1.05）：通道所在 IMU 不在位时
+	 * 该通道 ABSENT，另一通道不受影响；全 ABSENT（FPC 未插）返回 1 */
+	if (qvar_bringup_test() < 0) {
+		printk("WARN,qvar_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_PVDF_TEST
+	/* 4.11 PVDF 信号链自检（task-V1.05）：ANALOG 域上电 + SAADC
+	 * 三路 + VBIAS 窗口校验；失败仅告警 */
+	if (pvdf_bringup_test() != 0) {
+		printk("WARN,pvdf_bringup_failed\n");
+	}
 #endif
 
 #if CONFIG_APP_BOOT_LED_INDICATION
@@ -474,21 +612,54 @@ int main(void)
 		printk("SYSTEM_STATE,mode=active,vbus=0,rails=off\n");
 	}
 
+	/* 7.5 Sensor Hub 初始化（task-V1.06：蓝牙+电量计+采集调度，
+	 * 异步：栈就绪后自动开始广播）。
+	 * 失败仅告警不进 FAULT——蓝牙为附加功能，电源 UI 主流程
+	 * 必须继续（方案 §7 风险 6）。 */
+	ret = sensor_hub_bridge_init();
+	if (ret != 0) {
+		printk("WARN,hub_init_failed,rc=%d\n", ret);
+	}
+
 	printk("LED_MAP,red=nPM1300_LED0,blue=nPM1300_LED1\n");
 	printk("LED_PATTERN,boot=red_blink_3s,ready=both_blink_3s,"
 	       "shutdown=blue_blink_3s\n");
+#if CONFIG_APP_HEARTBEAT_LED
+	printk("LED_PATTERN,heartbeat=both_flash_%ums_every_%ums\n",
+	       HEARTBEAT_FLASH_MS, HEARTBEAT_PERIOD_MS);
+#endif
+	printk("HUB,svc=e5a00020,data=0x21,cmd=0x22,ack=0x23,info=0x24\n");
 	printk("BUTTON_UI,short=status_ack,hold_1s=arming_red,"
 	       "hold_3s=release_to_ship_red_blue\n");
 
 	/* 8. 主循环：20ms 周期轮询处理 */
+	int64_t last_temp_ms = -1000;
+	int temp_print_div = 0;
+
 	while (true) {
 		int64_t now_ms = k_uptime_get();
 
+		app_watchdog_kick();           /* 心跳：sysworkq 门控喂狗 */
 		handle_events(now_ms);          /* 按键/VBUS 事件 */
 		ret = update_led_pattern(now_ms);  /* LED 状态指示 */
 		if ((ret != 0) && (app_state != APP_STATE_FAULT)) {
 			enter_fault("led_update", ret);
 		}
+		/* 温度 1Hz 读取 + BLE 通知（TMP112 U2；ABSENT 时静默跳过） */
+#if CONFIG_APP_TEMP_TEST
+		if ((now_ms - last_temp_ms) >= 1000) {
+			last_temp_ms = now_ms;
+			int32_t mdeg;
+
+			if (temp_read_mdeg(&mdeg) == 0) {
+				if ((temp_print_div++ % 10) == 0) {
+					printk("TEMP,now=%d.%02dC\n",
+					       (int)(mdeg / 1000),
+					       (int)((mdeg % 1000) / 10));
+				}
+			}
+		}
+#endif
 		k_sleep(K_MSEC(LOOP_PERIOD_MS));
 	}
 }
