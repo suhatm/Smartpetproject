@@ -72,14 +72,14 @@ class FrameParser:
                 del self.buf[:i]
             if len(self.buf) < 6:
                 break
-            ln = self.buf[3]
-            total = 5 + ln + 1
+            ln = self.buf[4]   # 布局：SYNC(2) TYPE SEQ LEN PAYLOAD CRC
+            total = 6 + ln
             if len(self.buf) < total:
                 break
             body = bytes(self.buf[2:5 + ln])
             crc = self.buf[5 + ln]
             if crc8(body) == crc:
-                frames.append((body[0], body[1], bytes(self.buf[4:4 + ln])))
+                frames.append((body[0], body[1], bytes(self.buf[5:5 + ln])))
             else:
                 self.bad_crc += 1
             del self.buf[:total]
