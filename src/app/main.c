@@ -47,6 +47,15 @@
 #if CONFIG_APP_MIC_TEST
 #include "mic_pdm.h"
 #endif
+#if CONFIG_APP_BODY_IMU_TEST
+#include "body_imu.h"
+#endif
+#if CONFIG_APP_QVAR_TEST
+#include "qvar_sensor.h"
+#endif
+#if CONFIG_APP_PVDF_TEST
+#include "pvdf_adc.h"
+#endif
 #if CONFIG_APP_BLE_LED_TEST
 #include "ble_led_service.h"
 #endif
@@ -556,6 +565,30 @@ int main(void)
 	/* 4.8 双 PDM 麦自检（task-V1.04）：2s 采集 + 左右声道 RMS/峰值 */
 	if (mic_bringup_test() != 0) {
 		printk("WARN,mic_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_BODY_IMU_TEST
+	/* 4.9 柔性板 U1 IMU 自检（task-V1.05）：FPC 未插 ABSENT 非故障，
+	 * 返回 1 时仅打印告警，系统继续正常运行（硬件接入后即可用） */
+	if (body_imu_bringup_test() < 0) {
+		printk("WARN,body_imu_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_QVAR_TEST
+	/* 4.10 QVAR-A/B 通道自检（task-V1.05）：通道所在 IMU 不在位时
+	 * 该通道 ABSENT，另一通道不受影响；全 ABSENT（FPC 未插）返回 1 */
+	if (qvar_bringup_test() < 0) {
+		printk("WARN,qvar_bringup_failed\n");
+	}
+#endif
+
+#if CONFIG_APP_PVDF_TEST
+	/* 4.11 PVDF 信号链自检（task-V1.05）：ANALOG 域上电 + SAADC
+	 * 三路 + VBIAS 窗口校验；失败仅告警 */
+	if (pvdf_bringup_test() != 0) {
+		printk("WARN,pvdf_bringup_failed\n");
 	}
 #endif
 

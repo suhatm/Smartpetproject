@@ -198,5 +198,33 @@ config APP_MIC_TEST
 	  task-V1.04：U5/U6 PDM 双麦（pdm20，CLK=P1.12/DIN=P1.10，
 	  立体声分时隙）采集 2s 并计算左右声道 RMS/峰值。
 
+config APP_BODY_IMU_TEST
+	bool "Flex-board U1 LSM6DSV16X (body IMU) bring-up self-test"
+	default y
+	help
+	  task-V1.05：柔性板 U1 LSM6DSV16XTR（SENS_I2C @0x6A，经 FPC1）
+	  六轴驱动与连接状态机。FPC 未插时报告 ABSENT 不算失败；
+	  运行期排线松脱自动转 DEGRADED，reprobe 可恢复。
+
+config APP_QVAR_TEST
+	bool "QVAR-A/B channel bring-up self-test"
+	default y
+	help
+	  task-V1.05：QVAR 人体准静态感应两差分通道（四电极输入）：
+	  QVAR-A=柔性板 U1（AQVAR1/AQVAR2），QVAR-B=主板 U4（BQVAR1/BQVAR2）。
+	  CTRL7 ah_qvar_en 配置遵循数据手册"XL/G 先 power-down"时序，
+	  通道所在 IMU 不在位时该通道 ABSENT，不影响另一通道。
+
+config APP_PVDF_TEST
+	bool "PVDF piezo signal chain (SAADC) bring-up self-test"
+	default y
+	depends on ADC
+	help
+	  task-V1.05：PVDF 压电膜信号链（U8 OPA4391 → SAADC 三路：
+	  ADC_HEART/AIN1、ADC_RAW/AIN6、ADC_REF/AIN7）。
+	  ANALOG 域（ANA_EN=P1.06）上电后自检 VBIAS 窗口
+	  （1200~1800mV）。PVDF 膜未接（H2 悬空）不构成软件可检测
+	  的故障，由上层按信号幅度判活。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"

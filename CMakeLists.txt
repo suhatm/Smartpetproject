@@ -15,6 +15,9 @@ target_sources(app PRIVATE
     src/hardware/temp_sensor.c
     src/hardware/sd_store.c
     src/hardware/mic_pdm.c
+    src/hardware/body_imu.c
+    src/hardware/qvar_sensor.c
+    src/hardware/pvdf_adc.c
 )
 
 target_include_directories(app PRIVATE
