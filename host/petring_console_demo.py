@@ -580,6 +580,10 @@ class PetRingConsole(tk.Tk):
             ttk.Button(row, text="关", width=4,
                        command=lambda i=i: self.on_led(i, False)).pack(side="left",
                                                                        padx=(3, 0))
+        ttk.Label(led_f, text="⚠ LED1(蓝) 现板极性接反，实测不亮\n"
+                              "  （硬件待整改，非固件问题）",
+                  font=("微软雅黑", 8), foreground="#e67e22",
+                  justify="left").pack(anchor="w", pady=(4, 0))
 
         # --- 电源域 ---
         pwr_f = ttk.LabelFrame(self.ctrl, text=" 电源域控制（SENS/STORE/ANALOG） ",
@@ -684,7 +688,7 @@ class PetRingConsole(tk.Tk):
                                font=("Consolas", 9), justify="left")
             st_lbl.grid(row=7, column=0, columnspan=3, sticky="w")
             self.imu_stats[key] = st_lbl
-            ttk.Label(grid, text="量程 ±16g / ±2000dps\nint16 原始码转换",
+            ttk.Label(grid, text="量程 ±8g / ±2000dps\nint16 原始码直传",
                       font=("微软雅黑", 8), foreground="#7f8c8d",
                       justify="left").grid(row=8, column=0, columnspan=3,
                                            sticky="w", pady=(4, 0))
