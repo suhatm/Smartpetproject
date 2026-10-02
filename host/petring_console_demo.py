@@ -18,10 +18,14 @@
   LED 控制      ↔ CMD 0x01 LED_SET
   电源域控制    ↔ CMD 0x02 PWR_SET（单开/单关/全开/全关测试矩阵）
   六轴×2        ↔ TYPE 0x01/0x02；总览=六分量多色合成图，分量=下拉选单轴大图
-                （U1 柔性板可演示 ABSENT 灰显）
+                （面板含在位灯/|a|·|g|合成量/采样帧数；U1 可演示 ABSENT 灰显）
   QVAR×2        ↔ TYPE 0x03 + CMD 0x08 QVAR_THR_SET + EVENT 0x04 阈值触发
   PVDF          ↔ TYPE 0x04 heart/raw/ref mV + 波形
+  SD 存储测试   ↔ CSNP1GCR01-BOW SD NAND：CMD 0x0D SD_INFO / 0x0E SD_TEST
+                （写数据→读回→CRC 校验自测 + 容量/文件列表，V0.5 提案）
   电池页签      ↔ 大字 SOC/VBAT/充放态 + 充放电历史曲线（X=时间，双 Y 轴分色）
+  SD 卡测试     ↔ 拟新增 CMD 0x0D SD_TEST（写伪随机图样→读回逐块校验）
+                 + 0x09 REC_LIST / 0x0A 下载 / 0x0B 删除 文件管理
   麦克风录音    ↔ CMD 0x07 REC_CTRL（声道/时长/启停）+ 0x0A REC_READ 下载后本地播放
   帧监视        ↔ e5a00021 Notify 原始帧（SYNC/TYPE/SEQ/LEN/PAYLOAD/CRC8）
   指令终端      ↔ e5a00022 Write + e5a00023 CMD_ACK
@@ -59,6 +63,7 @@ class SimLink:
         self.rec_duration = 10
         self.rec_channels = (True, True)             # L, R
         self.rec_file = None                          # 录完生成的 wav 路径
+        self.sd_files = []                            # SD 录音文件 (id, 时长s, 大小KB, 时间)
         self.seq = {}                                 # 每 TYPE 独立序号
         # ---- 电池（模拟 nPM1300 库仑计 SOC，协议 V0.3 TYPE 0x08 BATTERY）----
         # 算法语义对齐固件 nrf_fuel_gauge：SOC 为状态量（电流积分），
@@ -136,10 +141,12 @@ class SimLink:
 # ---------------------------------------------------------------- 波形控件
 
 class WaveCanvas(tk.Canvas):
-    """单通道波形画布，环形缓冲，支持可选阈值线。"""
+    """单通道波形画布，环形缓冲，支持可选阈值线。带 Y 轴刻度与网格。"""
+
+    ML, MR, MT, MB = 46, 8, 22, 6     # 左留白放刻度，上留白放标题
 
     def __init__(self, master, title="", unit="", ymin=-100, ymax=100,
-                 width=340, height=110, color="#1a76d2", **kw):
+                 width=380, height=120, color="#1a76d2", **kw):
         super().__init__(master, width=width, height=height,
                          bg="#101418", highlightthickness=1,
                          highlightbackground="#3a4148", **kw)
@@ -158,55 +165,76 @@ class WaveCanvas(tk.Canvas):
     def set_thresholds(self, values):
         self.thr_lines = list(values)
 
+    def _pw(self):
+        return self.w - self.ML - self.MR
+
     def push(self, v):
         self.data.append(v)
-        if len(self.data) > self.w:
+        if len(self.data) > self._pw():
             self.data.pop(0)
 
     def clear(self):
         self.data.clear()
         self._draw_frame()
 
+    def _ticks(self):
+        vals = [self.ymin, self.ymax]
+        if self.ymin < 0 < self.ymax:
+            vals.insert(1, 0)
+        return vals
+
+    def _y_of(self, v):
+        span = (self.ymax - self.ymin) or 1
+        v = max(self.ymin, min(self.ymax, v))
+        ph = self.h - self.MT - self.MB
+        return self.MT + ph - (v - self.ymin) / span * ph
+
     def _draw_frame(self):
         self.delete("all")
-        self.create_text(6, 4, anchor="nw", fill="#9aa4ad",
-                         font=("微软雅黑", 8), text=self.title)
+        pw = self._pw()
+        self.create_text(self.ML, 4, anchor="nw", fill="#c8d2da",
+                         font=("微软雅黑", 9, "bold"), text=self.title)
         if self.unit:
             self.create_text(self.w - 6, 4, anchor="ne", fill="#9aa4ad",
-                             font=("微软雅黑", 8), text=self.unit)
+                             font=("微软雅黑", 9), text=self.unit)
+        # 横向网格 + Y 轴刻度（min/0/max）
+        for v in self._ticks():
+            y = self._y_of(v)
+            self.create_line(self.ML, y, self.ML + pw, y, fill="#232a31")
+            self.create_text(self.ML - 4, y, anchor="e", fill="#7f8c8d",
+                             font=("Consolas", 8), text=f"{v:g}")
 
     def redraw(self):
         self._draw_frame()
-        span = (self.ymax - self.ymin) or 1
-
-        def y_of(v):
-            v = max(self.ymin, min(self.ymax, v))
-            return self.h - 8 - (v - self.ymin) / span * (self.h - 24)
-
-        # 零线
+        pw = self._pw()
+        # 零线（比网格略亮）
         if self.ymin < 0 < self.ymax:
-            y0 = y_of(0)
-            self.create_line(0, y0, self.w, y0, fill="#2c343c")
+            y0 = self._y_of(0)
+            self.create_line(self.ML, y0, self.ML + pw, y0, fill="#39434c")
         # 阈值线
         for tv in self.thr_lines:
-            y = y_of(tv)
-            self.create_line(0, y, self.w, y, fill="#c0392b", dash=(4, 3))
+            y = self._y_of(tv)
+            self.create_line(self.ML, y, self.ML + pw, y,
+                             fill="#c0392b", dash=(4, 3))
         # 波形
         n = len(self.data)
         if n >= 2:
             pts = []
-            x0 = self.w - n
+            x0 = self.ML + pw - n
             for i, v in enumerate(self.data):
-                pts += [x0 + i, y_of(v)]
+                pts += [x0 + i, self._y_of(v)]
             self.create_line(*pts, fill=self.color, width=1.4)
 
 # ---------------------------------------------------------------- 多序列波形
 
 class MultiWaveCanvas(tk.Canvas):
-    """多序列波形画布：同一量纲的多条曲线（如 ax/ay/az）分色显示，带图例。"""
+    """多序列波形画布：同一量纲的多条曲线（如 ax/ay/az）分色显示，
+    带图例、Y 轴刻度与网格。"""
+
+    ML, MR, MT, MB = 46, 8, 24, 6
 
     def __init__(self, master, title="", unit="", ymin=-100, ymax=100,
-                 series=(("s1", "#2ecc71"),), width=340, height=110, **kw):
+                 series=(("s1", "#2ecc71"),), width=430, height=136, **kw):
         super().__init__(master, width=width, height=height,
                          bg="#101418", highlightthickness=1,
                          highlightbackground="#3a4148", **kw)
@@ -220,10 +248,14 @@ class MultiWaveCanvas(tk.Canvas):
     def set_range(self, ymin, ymax):
         self.ymin, self.ymax = ymin, ymax
 
+    def _pw(self):
+        return self.w - self.ML - self.MR
+
     def push(self, values):
+        pw = self._pw()
         for (_, _, buf), v in zip(self.series, values):
             buf.append(v)
-            if len(buf) > self.w:
+            if len(buf) > pw:
                 buf.pop(0)
 
     def clear(self):
@@ -234,34 +266,49 @@ class MultiWaveCanvas(tk.Canvas):
     def _y_of(self, v):
         span = (self.ymax - self.ymin) or 1
         v = max(self.ymin, min(self.ymax, v))
-        return self.h - 8 - (v - self.ymin) / span * (self.h - 30)
+        ph = self.h - self.MT - self.MB
+        return self.MT + ph - (v - self.ymin) / span * ph
+
+    def _ticks(self):
+        vals = [self.ymin, self.ymax]
+        if self.ymin < 0 < self.ymax:
+            vals.insert(1, 0)
+        return vals
 
     def _draw_frame(self):
         self.delete("all")
-        self.create_text(6, 4, anchor="nw", fill="#9aa4ad",
-                         font=("微软雅黑", 8), text=self.title)
+        pw = self._pw()
+        self.create_text(self.ML, 4, anchor="nw", fill="#c8d2da",
+                         font=("微软雅黑", 9, "bold"), text=self.title)
         if self.unit:
             self.create_text(self.w - 6, 4, anchor="ne", fill="#9aa4ad",
-                             font=("微软雅黑", 8), text=self.unit)
+                             font=("微软雅黑", 9), text=self.unit)
         # 图例（标题右侧）
-        lx = 6 + len(self.title) * 9 + 10
+        lx = self.ML + len(self.title) * 12 + 12
         for nm, color, _ in self.series:
-            self.create_line(lx, 10, lx + 12, 10, fill=color, width=2)
-            self.create_text(lx + 15, 10, anchor="w", fill=color,
-                             font=("Consolas", 7), text=nm)
-            lx += 15 + len(nm) * 8 + 14
+            self.create_line(lx, 11, lx + 14, 11, fill=color, width=2)
+            self.create_text(lx + 17, 11, anchor="w", fill=color,
+                             font=("Consolas", 9, "bold"), text=nm)
+            lx += 17 + len(nm) * 9 + 16
+        # 横向网格 + Y 轴刻度（min/0/max）
+        for v in self._ticks():
+            y = self._y_of(v)
+            self.create_line(self.ML, y, self.ML + pw, y, fill="#232a31")
+            self.create_text(self.ML - 4, y, anchor="e", fill="#7f8c8d",
+                             font=("Consolas", 8), text=f"{v:g}")
 
     def redraw(self):
         self._draw_frame()
-        # 零线
+        pw = self._pw()
+        # 零线（比网格略亮）
         if self.ymin < 0 < self.ymax:
             y0 = self._y_of(0)
-            self.create_line(0, y0, self.w, y0, fill="#2c343c")
+            self.create_line(self.ML, y0, self.ML + pw, y0, fill="#39434c")
         for _, color, buf in self.series:
             n = len(buf)
             if n >= 2:
                 pts = []
-                x0 = self.w - n
+                x0 = self.ML + pw - n
                 for i, v in enumerate(buf):
                     pts += [x0 + i, self._y_of(v)]
                 self.create_line(*pts, fill=color, width=1.3)
@@ -372,7 +419,7 @@ class PetRingConsole(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("宠物环传感器控制  v0.2 DEMO（模拟数据）")
+        self.title("宠物环传感器控制  v0.3 DEMO（模拟数据）")
         self.configure(bg=self.BG)
         self.geometry("1320x840")
         self.minsize(1180, 760)
@@ -402,6 +449,10 @@ class PetRingConsole(tk.Tk):
         st.configure("TLabelframe.Label", background=self.BG,
                      foreground="#8ab4f8", font=("微软雅黑", 9, "bold"))
         st.configure("TSeparator", background="#3a4148")
+        st.configure("Treeview", background="#101418",
+                     fieldbackground="#101418", foreground="#d7dde3",
+                     font=("Consolas", 9))
+        st.configure("Treeview.Heading", font=("微软雅黑", 9))
 
     # ---------------- 顶部连接栏 ----------------
     def _build_top(self):
@@ -595,6 +646,7 @@ class PetRingConsole(tk.Tk):
         self._tab_imu()
         self._tab_qvar()
         self._tab_pvdf()
+        self._tab_sd()
         self._tab_battery()
         self._tab_frames()
         self._tab_terminal()
@@ -604,22 +656,39 @@ class PetRingConsole(tk.Tk):
         self.nb.add(tab, text=" 六轴 IMU ")
         self.imu_vals = {}
         self.imu_ui = {}
-        axes = [("ax", "mg"), ("ay", "mg"), ("az", "mg"),
-                ("gx", "dps×10"), ("gy", "dps×10"), ("gz", "dps×10")]
+        self.imu_stats = {}
+        self._imu_hist = {"U4": [], "U1": []}
+        axes = [("ax", "mg", "#2ecc71"), ("ay", "mg", "#3498db"),
+                ("az", "mg", "#e74c3c"), ("gx", "dps×10", "#e67e22"),
+                ("gy", "dps×10", "#f1c40f"), ("gz", "dps×10", "#9b59b6")]
         for idx, (key, title) in enumerate((("U4", "主板 U4"), ("U1", "柔性板 U1"))):
-            lf = ttk.LabelFrame(tab, text=f" {title} LSM6DSV16X ", padding=6)
+            lf = ttk.LabelFrame(tab, text=f" {title} LSM6DSV16X（ODR 30 Hz） ",
+                                padding=6)
             lf.grid(row=0, column=idx, padx=8, pady=6, sticky="n")
-            # 左列：六分量数值
+            # 左列：六分量数值（轴名分色、数值大号加粗）+ RMS 统计
             grid = ttk.Frame(lf)
             grid.pack(side="left", fill="y", padx=(0, 8))
             self.imu_vals[key] = []
-            for r, (nm, unit) in enumerate(axes):
-                ttk.Label(grid, text=nm).grid(row=r, column=0, sticky="e")
-                v = ttk.Label(grid, text="—", width=10, font=("Consolas", 10))
-                v.grid(row=r, column=1, sticky="w")
-                ttk.Label(grid, text=unit, font=("微软雅黑", 8)).grid(
-                    row=r, column=2, sticky="w")
+            for r, (nm, unit, color) in enumerate(axes):
+                tk.Label(grid, text=nm, fg=color, bg=self.BG,
+                         font=("Consolas", 11, "bold")).grid(
+                    row=r, column=0, sticky="e")
+                v = ttk.Label(grid, text="—", width=9,
+                              font=("Consolas", 12, "bold"))
+                v.grid(row=r, column=1, sticky="w", padx=(4, 0))
+                ttk.Label(grid, text=unit, font=("微软雅黑", 9)).grid(
+                    row=r, column=2, sticky="w", padx=(4, 0))
                 self.imu_vals[key].append(v)
+            ttk.Separator(grid, orient="horizontal").grid(
+                row=6, column=0, columnspan=3, sticky="ew", pady=6)
+            st_lbl = ttk.Label(grid, text="RMS |a|   — mg\nRMS |g|   — dps",
+                               font=("Consolas", 9), justify="left")
+            st_lbl.grid(row=7, column=0, columnspan=3, sticky="w")
+            self.imu_stats[key] = st_lbl
+            ttk.Label(grid, text="量程 ±16g / ±2000dps\nint16 原始码转换",
+                      font=("微软雅黑", 8), foreground="#7f8c8d",
+                      justify="left").grid(row=8, column=0, columnspan=3,
+                                           sticky="w", pady=(4, 0))
             # 右列：模式选择 + 画布区
             right = ttk.Frame(lf)
             right.pack(side="left", fill="both", expand=True)
@@ -637,7 +706,7 @@ class PetRingConsole(tk.Tk):
                 side="left", padx=(10, 2))
             comp_cb = ttk.Combobox(
                 ctl, textvariable=comp_var, width=5, state="readonly",
-                values=[nm for nm, _ in axes])
+                values=[nm for nm, _, _ in axes])
             comp_cb.pack(side="left")
             comp_cb.bind("<<ComboboxSelected>>",
                          lambda e, k=key: self.on_imu_comp(k))
@@ -658,7 +727,7 @@ class PetRingConsole(tk.Tk):
             # 分量：单轴大图
             sg = ttk.Frame(right)
             ws = WaveCanvas(sg, title=f"{title} ax", unit="mg",
-                            ymin=-2200, ymax=2200, width=380, height=216,
+                            ymin=-2200, ymax=2200, width=430, height=292,
                             color="#2ecc71")
             ws.pack(pady=2)
             self.imu_ui[key] = {"mode": mode_var, "comp": comp_var,
@@ -753,6 +822,151 @@ class PetRingConsole(tk.Tk):
         self.pvdf_wave2.pack(pady=4)
         ttk.Label(tab, text="提示：ANALOG 域断电时链路无输出（波形归零、状态转灰）",
                   font=("微软雅黑", 8)).pack(anchor="w", padx=8)
+
+    def _tab_sd(self):
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text=" SD 卡测试 ")
+        self.sd_test = None                 # 进行中的测试状态 dict
+        # ---- 卡片信息 ----
+        info = ttk.LabelFrame(
+            tab, text=" 存储芯片：CSNP1GCR01-BOW（SD NAND · 贴片 TF 卡） ",
+            padding=8)
+        info.pack(fill="x", padx=8, pady=6)
+        self.sd_lamp = tk.Label(info, text="●", fg="#2ecc71", bg=self.BG,
+                                font=("微软雅黑", 14))
+        self.sd_lamp.pack(side="left")
+        ttk.Label(info, text=" 在位 · 容量 128 MB（1Gbit SLC）· SPI 4 线 25 MHz · "
+                             "FAT32 · 内置 ECC/坏块管理 · 可用约 115 MB",
+                  font=("微软雅黑", 10)).pack(side="left", padx=(4, 20))
+        ttk.Button(info, text="模拟插/拔 SD 卡",
+                   command=self.on_sd_toggle).pack(side="left")
+        ttk.Label(info, text="测试原理：写伪随机图样 → 读回逐块比对（CRC 校验）",
+                  font=("微软雅黑", 8)).pack(side="right")
+        # ---- 读写测试 ----
+        rw = ttk.LabelFrame(
+            tab, text=" 读写测试（拟新增 CMD 0x0D SD_TEST，待协议评审） ",
+            padding=8)
+        rw.pack(fill="x", padx=8, pady=4)
+        row = ttk.Frame(rw)
+        row.pack(fill="x", pady=2)
+        ttk.Label(row, text="测试大小:").pack(side="left")
+        self.sd_size = tk.Spinbox(row, from_=1, to=64, width=4)
+        self.sd_size.delete(0, "end")
+        self.sd_size.insert(0, "4")
+        self.sd_size.pack(side="left")
+        ttk.Label(row, text="MB").pack(side="left", padx=(2, 12))
+        self.sd_verify = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="写后读回校验",
+                        variable=self.sd_verify).pack(side="left")
+        self.sd_inject_err = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="注入校验错误（演示）",
+                        variable=self.sd_inject_err).pack(side="left", padx=8)
+        self.btn_sd_test = ttk.Button(row, text="开始测试",
+                                      command=self.on_sd_test_start)
+        self.btn_sd_test.pack(side="right")
+        self.sd_prog = ttk.Progressbar(rw, length=400, mode="determinate")
+        self.sd_prog.pack(fill="x", pady=4)
+        self.lbl_sd_status = ttk.Label(rw, text="就绪")
+        self.lbl_sd_status.pack(anchor="w")
+        res = ttk.Frame(rw)
+        res.pack(fill="x", pady=(4, 0))
+        for label, attr in (("写入速度:", "sd_res_w"), ("读取速度:", "sd_res_r"),
+                            ("校验结果:", "sd_res_v")):
+            ttk.Label(res, text=label).pack(side="left", padx=(0, 2))
+            v = ttk.Label(res, text="—", width=22,
+                          font=("Consolas", 11, "bold"))
+            v.pack(side="left", padx=(0, 16))
+            setattr(self, attr, v)
+        # ---- 录音文件列表 ----
+        files = ttk.LabelFrame(
+            tab, text=" SD 录音文件（CMD 0x09 REC_LIST / 0x0A 下载 / 0x0B 删除） ",
+            padding=8)
+        files.pack(fill="both", expand=True, padx=8, pady=4)
+        cols = ("id", "dur", "size", "time")
+        self.sd_tree = ttk.Treeview(files, columns=cols, show="headings",
+                                    height=5)
+        for c, t, w in (("id", "文件 ID", 70), ("dur", "时长 (s)", 90),
+                        ("size", "大小 (KB)", 90), ("time", "录制时间", 110)):
+            self.sd_tree.heading(c, text=t)
+            self.sd_tree.column(c, width=w, anchor="center")
+        self.sd_tree.pack(fill="both", expand=True, pady=2)
+        brow = ttk.Frame(files)
+        brow.pack(fill="x", pady=2)
+        ttk.Button(brow, text="刷新列表（0x09）",
+                   command=self._sd_refresh_files_log).pack(side="left")
+        ttk.Button(brow, text="下载所选（0x0A）",
+                   command=self.on_sd_download).pack(side="left", padx=4)
+        ttk.Button(brow, text="删除所选（0x0B）",
+                   command=self.on_sd_delete).pack(side="left", padx=4)
+        ttk.Label(tab, text="提示：STORE 域控制 SD 卡电源；SD 不在位时测试与录音均不可用。",
+                  font=("微软雅黑", 8)).pack(anchor="w", padx=10, pady=2)
+
+    # ---- SD 卡事件 ----
+    def on_sd_toggle(self):
+        lk = self.link
+        lk.mod_state["SD"] = 2 if lk.mod_state["SD"] == 1 else 1
+        self._refresh_mod_lamps()
+        on = lk.mod_state["SD"] == 1
+        self.sd_lamp.configure(fg="#2ecc71" if on else "#5d6d7e")
+        self.log("SD 卡 " + ("插入，FAT32 挂载成功（/SD:）。"
+                            if on else "拔出，已卸载。"))
+        self.term_print(f"<< EVENT 0x21 id=0x01 module=7 "
+                        f"new_state={lk.mod_state['SD']}")
+
+    def on_sd_test_start(self):
+        if self.link.mod_state["SD"] != 1:
+            self.log("SD 卡不在位，无法测试。")
+            return
+        if self.sd_test:
+            return
+        size_mb = max(1, int(self.sd_size.get()))
+        self.sd_test = {"total": size_mb * 1024, "done": 0, "phase": "write",
+                        "w_speed": 0.0, "r_speed": 0.0, "bad": 0}
+        self.btn_sd_test.configure(state="disabled")
+        self.sd_prog["value"] = 0
+        for attr in ("sd_res_w", "sd_res_r", "sd_res_v"):
+            getattr(self, attr).configure(text="—", foreground=self.FG)
+        self.term_print(
+            f">> CMD 0x0D SD_TEST size={size_mb}MB "
+            f"verify={1 if self.sd_verify.get() else 0}（拟新增，待评审）")
+        self.log(f"SD 测试开始：写入 {size_mb}MB 伪随机图样（0xAA55 种子递增）……")
+
+    def _sd_refresh_files(self):
+        self.sd_tree.delete(*self.sd_tree.get_children())
+        for fid, dur, kb, ts in self.link.sd_files:
+            self.sd_tree.insert("", "end", iid=str(fid),
+                                values=(fid, f"{dur:.1f}", kb, ts))
+
+    def _sd_refresh_files_log(self):
+        self._sd_refresh_files()
+        self.term_print(">> CMD 0x09 REC_LIST")
+        self.term_print(f"<< CMD_ACK cmd=0x09 result=0 "
+                        f"count={len(self.link.sd_files)}")
+
+    def _sd_selected(self):
+        sel = self.sd_tree.selection()
+        return int(sel[0]) if sel else None
+
+    def on_sd_download(self):
+        fid = self._sd_selected()
+        if fid is None:
+            self.log("请先在文件列表中选择一个录音文件。")
+            return
+        self.term_print(f">> CMD 0x0A REC_READ file_id={fid}")
+        self.term_print("<< CMD_ACK cmd=0x0A result=0"
+                        "（→ 0x07 AUDIO_FILE 分块上传，模拟完成）")
+        self.log(f"录音文件 file_id={fid} 下载完成（模拟）。")
+
+    def on_sd_delete(self):
+        fid = self._sd_selected()
+        if fid is None:
+            self.log("请先在文件列表中选择一个录音文件。")
+            return
+        self.link.sd_files = [f for f in self.link.sd_files if f[0] != fid]
+        self._sd_refresh_files()
+        self.term_print(f">> CMD 0x0B REC_DELETE file_id={fid}")
+        self.term_print("<< CMD_ACK cmd=0x0B result=0")
+        self.log(f"录音文件 file_id={fid} 已从 SD 删除。")
 
     def _tab_battery(self):
         tab = ttk.Frame(self.nb)
@@ -941,11 +1155,18 @@ class PetRingConsole(tk.Tk):
         self.btn_rec_stop.configure(state="disabled")
         dur = lk.rec_elapsed if not auto else lk.rec_duration
         lk.rec_file = self._synthesize_wav(dur, lk.rec_channels)
-        self.term_print("<< EVENT 0x21 id=0x05 REC_STATE state=2 file_id=1")
-        self.log(f"录音完成（{dur:.1f}s）→ 已下载文件 file_id=1 到本地，可播放。"
-                 f"（真实链路：CMD 0x0A REC_READ → 0x07 AUDIO_FILE 分块上传）")
+        # 录音文件同步进 SD 文件列表（PCM 16kHz/16bit）
+        fid = max([f[0] for f in lk.sd_files], default=0) + 1
+        nch = 2 if all(lk.rec_channels) else 1
+        kb = int(dur * 16000 * 2 * nch / 1024)
+        lk.sd_files.append((fid, dur, kb, time.strftime("%H:%M:%S")))
+        self._sd_refresh_files()
+        self.term_print(f"<< EVENT 0x21 id=0x05 REC_STATE state=2 file_id={fid}")
+        self.log(f"录音完成（{dur:.1f}s，{kb}KB）→ 已下载文件 file_id={fid} "
+                 f"到本地，可播放。（真实链路：CMD 0x0A REC_READ → "
+                 f"0x07 AUDIO_FILE 分块上传）")
         self.btn_rec_play.configure(state="normal")
-        self.lbl_rec.configure(text=f"已保存 file_id=1（{dur:.1f}s）")
+        self.lbl_rec.configure(text=f"已保存 file_id={fid}（{dur:.1f}s）")
 
     def on_rec_play(self):
         if not self.link.rec_file:
@@ -1011,6 +1232,7 @@ class PetRingConsole(tk.Tk):
             "0A": "<< CMD_ACK cmd=0x0A result=0（REC_READ 开始上传 → 0x07 帧流）",
             "0B": "<< CMD_ACK cmd=0x0B result=0（REC_DELETE）",
             "0C": "<< CMD_ACK cmd=0x0C result=0 → BATTERY 帧随后到达（GET_BATTERY）",
+            "0D": "<< CMD_ACK cmd=0x0D result=0 w=1.35MB/s r=2.86MB/s（SD_TEST）",
             "10": "<< CMD_ACK cmd=0x10 result=0 → MODULE_STATUS 帧随后到达",
             "11": "<< CMD_ACK cmd=0x11 result=0 data='v1.06;task-V1.06;DEMO'",
             "7F": "<< CMD_ACK cmd=0x7F result=0 data=DE AD BE EF（回显）",
@@ -1054,6 +1276,21 @@ class PetRingConsole(tk.Tk):
                     f = lk.imu_frame(pitch)
                     for lbl, val in zip(self.imu_vals[key], f):
                         lbl.configure(text=str(val))
+                    # RMS 统计（最近 50 帧，约 5 秒窗）
+                    hist = self._imu_hist[key]
+                    hist.append(f)
+                    if len(hist) > 50:
+                        hist.pop(0)
+                    n = len(hist)
+                    rms_a = math.sqrt(
+                        sum(s[0] ** 2 + s[1] ** 2 + s[2] ** 2
+                            for s in hist) / n)
+                    rms_g = math.sqrt(
+                        sum(s[3] ** 2 + s[4] ** 2 + s[5] ** 2
+                            for s in hist) / n) / 10
+                    self.imu_stats[key].configure(
+                        text=f"RMS |a| {rms_a:5.0f} mg\n"
+                             f"RMS |g| {rms_g:5.1f} dps")
                     ui = self.imu_ui[key]
                     if ui["mode"].get() == "overview":
                         ui["wa"].push(f[0:3])
@@ -1107,6 +1344,56 @@ class PetRingConsole(tk.Tk):
                     text=f"录音中 {lk.rec_elapsed:.1f}s / {lk.rec_duration}s")
                 if lk.rec_elapsed >= lk.rec_duration:
                     self.on_rec_stop(auto=True)
+        # ---- SD 读写测试推进（不依赖连接状态，仅依赖 SD 在位）----
+        st = self.sd_test
+        if st is not None:
+            if st["phase"] == "write":
+                spd = random.uniform(1.1, 1.6)          # MB/s，模拟 SPI 写速
+                st["w_speed"] = spd
+                st["done"] += spd * 102.4               # 0.1s 增量（KB）
+                self.sd_prog["value"] = min(50, st["done"] / st["total"] * 50)
+                self.lbl_sd_status.configure(
+                    text=f"写入中 {min(st['done'], st['total']) / 1024:.1f}"
+                         f" / {st['total'] // 1024} MB · {spd:.2f} MB/s")
+                if st["done"] >= st["total"]:
+                    st["done"] = 0
+                    st["phase"] = "read" if self.sd_verify.get() else "done"
+            elif st["phase"] == "read":
+                spd = random.uniform(2.2, 3.4)          # MB/s，模拟读速
+                st["r_speed"] = spd
+                st["done"] += spd * 102.4
+                if self.sd_inject_err.get() and random.random() < 0.04:
+                    st["bad"] += 1
+                self.sd_prog["value"] = 50 + min(
+                    50, st["done"] / st["total"] * 50)
+                self.lbl_sd_status.configure(
+                    text=f"读回校验中 {min(st['done'], st['total']) / 1024:.1f}"
+                         f" / {st['total'] // 1024} MB · {spd:.2f} MB/s")
+                if st["done"] >= st["total"]:
+                    st["phase"] = "done"
+            if st is not None and st["phase"] == "done":
+                verify_on = self.sd_verify.get()
+                ok = st["bad"] == 0
+                self.sd_res_w.configure(text=f"{st['w_speed']:.2f} MB/s")
+                self.sd_res_r.configure(
+                    text=f"{st['r_speed']:.2f} MB/s" if verify_on else "—")
+                if verify_on:
+                    self.sd_res_v.configure(
+                        text=("通过 ✔" if ok
+                              else f"失败 ✘（{st['bad']} 块不一致）"),
+                        foreground="#2ecc71" if ok else "#e74c3c")
+                else:
+                    self.sd_res_v.configure(text="未启用",
+                                            foreground="#9aa4ad")
+                self.term_print(
+                    f"<< CMD_ACK cmd=0x0D result={0 if ok else -5} "
+                    f"w={st['w_speed']:.2f}MB/s r={st['r_speed']:.2f}MB/s")
+                self.log(f"SD 测试完成：写 {st['w_speed']:.2f} MB/s，"
+                         f"读 {st['r_speed']:.2f} MB/s，"
+                         f"校验{'通过' if ok else '失败'}。")
+                self.sd_test = None
+                self.btn_sd_test.configure(state="normal")
+                self.lbl_sd_status.configure(text="就绪")
         self.after(100, self._tick)      # 10Hz GUI 刷新（demo 足够）
 
     def _emit_frame(self, ftype, payload):
