@@ -41,7 +41,7 @@
 #define FRAME_MAX_PAYLOAD 240U
 
 /** 帧环形缓冲（已封装整帧字节流）：stream 与 ack 各一个 */
-#define FRAME_BUF_SIZE   1024U
+#define FRAME_BUF_SIZE   2048U
 
 /** 打包周期（ms）：缓冲区非空即组包；文件传输时立即 */
 #define PACK_PERIOD_MS   50U
@@ -178,9 +178,9 @@ static uint16_t frame_buf_take(struct frame_buf *fb, uint8_t *out, uint16_t max_
 
 	k_mutex_lock(&fb->lock, K_FOREVER);
 	while (fb->used > 0U) {
-		/* 整帧长度 = 头5 + LEN + CRC1；LEN 在 head+3 */
+		/* 整帧长度 = 头5 + LEN + CRC1；帧布局 SYNC0/1 TYPE SEQ LEN，LEN 在 head+4 */
 		uint16_t avail = fb->used;
-		uint8_t plen = fb->data[(fb->head + 3U) % FRAME_BUF_SIZE];
+		uint8_t plen = fb->data[(fb->head + 4U) % FRAME_BUF_SIZE];
 		uint16_t flen = FRAME_HDR_LEN + plen + FRAME_CRC_LEN;
 
 		if ((avail < flen) || ((uint16_t)(copied + flen) > max_len)) {
@@ -208,6 +208,35 @@ static K_WORK_DELAYABLE_DEFINE(pack_work, pack_work_handler);
 /** 单包发送缓冲（MTU 上限 247-3） */
 static uint8_t pkt_buf[244];
 
+/** 发送挂起槽：notify 失败时保留未发出字节，下次先补发（保序不丢帧）。
+ *  上板实测：TX 缓冲耗尽时 bt_gatt_notify 返错，直接丢弃已取出的包
+ *  会导致文件传输缺帧（REC_READ 长度/CRC 失败）。 */
+static uint8_t ack_pend[FRAME_HDR_LEN + FRAME_MAX_PAYLOAD + FRAME_CRC_LEN];
+static uint16_t ack_pend_len;
+static uint8_t stream_pend[FRAME_HDR_LEN + FRAME_MAX_PAYLOAD + FRAME_CRC_LEN];
+static uint16_t stream_pend_len;
+
+/** 单通道发送：先补挂起包，再按 room 取新帧；失败保数据并停发（由调用方重调度） */
+static void flush_channel(struct frame_buf *fb, const struct bt_gatt_attr *attr,
+			  uint8_t *pend, uint16_t *pend_len, uint16_t room,
+			  const char *tag)
+{
+	for (;;) {
+		if (*pend_len == 0U) {
+			*pend_len = frame_buf_take(fb, pend, room);
+			if (*pend_len == 0U) {
+				return; /* 缓冲空 */
+			}
+		}
+		if (bt_gatt_notify(NULL, attr, pend, *pend_len) == 0) {
+			*pend_len = 0U;
+			continue;
+		}
+		printk("HUB,%s_notify_fail,n=%u\n", tag, *pend_len);
+		return; /* 保留 pend，等待重试 */
+	}
+}
+
 static void pack_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -221,6 +250,8 @@ static void pack_work_handler(struct k_work *work)
 		}
 		while (frame_buf_take(&ack_buf, dump, sizeof(dump)) > 0U) {
 		}
+		stream_pend_len = 0U;
+		ack_pend_len = 0U;
 		return;
 	}
 
@@ -234,31 +265,12 @@ static void pack_work_handler(struct k_work *work)
 	}
 
 	/* ack 通道优先（应答/事件实时性高于数据流） */
-	for (;;) {
-		uint16_t n = frame_buf_take(&ack_buf, pkt_buf, room);
+	flush_channel(&ack_buf, &hub_svc.attrs[7], ack_pend, &ack_pend_len,
+		      room, "ack");
+	flush_channel(&stream_buf, &hub_svc.attrs[2], stream_pend,
+		      &stream_pend_len, room, "data");
 
-		if (n == 0U) {
-			break;
-		}
-		if (bt_gatt_notify(NULL, &hub_svc.attrs[7], pkt_buf, n) != 0) {
-			printk("HUB,ack_notify_fail,n=%u\n", n);
-			break;
-		}
-	}
-
-	for (;;) {
-		uint16_t n = frame_buf_take(&stream_buf, pkt_buf, room);
-
-		if (n == 0U) {
-			break;
-		}
-		if (bt_gatt_notify(NULL, &hub_svc.attrs[2], pkt_buf, n) != 0) {
-			printk("HUB,data_notify_fail,n=%u\n", n);
-			break;
-		}
-	}
-
-	/* 缓冲还有剩（单包发不完）：继续调度 */
+	/* 还有未发完的数据（缓冲剩余或挂起包）：继续调度 */
 	bool pending;
 
 	k_mutex_lock(&stream_buf.lock, K_FOREVER);
@@ -267,12 +279,18 @@ static void pack_work_handler(struct k_work *work)
 	k_mutex_lock(&ack_buf.lock, K_FOREVER);
 	pending = pending || (ack_buf.used > 0U);
 	k_mutex_unlock(&ack_buf.lock);
+	pending = pending || (stream_pend_len > 0U) || (ack_pend_len > 0U);
 
 	if (pending) {
-		k_work_reschedule(&pack_work,
-				  (atomic_get(&file_xfer) != 0)
-					  ? K_NO_WAIT
-					  : K_MSEC(PACK_PERIOD_MS));
+		/* 有挂起包=TX 缓冲满：短退避；否则按常规周期/文件传输立即 */
+		k_timeout_t delay = K_MSEC(PACK_PERIOD_MS);
+
+		if ((stream_pend_len > 0U) || (ack_pend_len > 0U)) {
+			delay = K_MSEC(5);
+		} else if (atomic_get(&file_xfer) != 0) {
+			delay = K_NO_WAIT;
+		}
+		k_work_reschedule(&pack_work, delay);
 	}
 }
 
@@ -586,6 +604,27 @@ void hub_file_xfer_mode(bool on)
 	atomic_set(&file_xfer, on ? 1 : 0);
 }
 
+int hub_stream_flush_wait(k_timeout_t timeout)
+{
+	int64_t deadline = k_uptime_get() +
+			   k_ticks_to_ms_floor64(timeout.ticks);
+
+	for (;;) {
+		uint16_t used;
+
+		k_mutex_lock(&stream_buf.lock, K_FOREVER);
+		used = stream_buf.used;
+		k_mutex_unlock(&stream_buf.lock);
+		if (used == 0U && stream_pend_len == 0U) {
+			return 0;
+		}
+		if (k_uptime_get() >= deadline) {
+			return -EAGAIN;
+		}
+		k_msleep(5);
+	}
+}
+
 bool hub_led_override_get(uint8_t *mask)
 {
 	atomic_val_t v = atomic_get(&led_override);
@@ -632,6 +671,11 @@ bool hub_stream_subscribed(void) { return false; }
 bool hub_event_subscribed(void) { return false; }
 bool hub_connected(void) { return false; }
 void hub_file_xfer_mode(bool on) { ARG_UNUSED(on); }
+int hub_stream_flush_wait(k_timeout_t timeout)
+{
+	ARG_UNUSED(timeout);
+	return 0;
+}
 bool hub_led_override_get(uint8_t *mask)
 {
 	ARG_UNUSED(mask);

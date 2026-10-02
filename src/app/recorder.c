@@ -500,13 +500,23 @@ static void xfer_run(uint16_t file_id, uint32_t offset)
 
 		crc = crc32_ieee_update(crc, buf + 6U, (size_t)rd);
 
-		/* 缓冲满时短暂等待（hub pack 以 ASAP 模式发送） */
-		for (uint8_t retry = 0; retry < 50U; retry++) {
+		/* 缓冲满时短暂等待（hub pack 以 ASAP 模式发送）。
+		 * 上板实测 50×10ms 预算在链路拥挤时不够，丢块后 pos 照常
+		 * 前进造成文件缺口；扩到 5s 仍失败则中止传输（不发 DONE，
+		 * 上位机超时后可用 offset 断点续传） */
+		bool sent = false;
+
+		for (uint16_t retry = 0; retry < 500U; retry++) {
 			if (hub_stream_frame(HUB_TYPE_AUDIO_FILE, buf,
 					     (uint8_t)(6U + rd)) == 0) {
+				sent = true;
 				break;
 			}
 			k_msleep(10);
+		}
+		if (!sent) {
+			printk("XFER,fail,buf_full,pos=%u\n", pos);
+			break;
 		}
 
 		pos += (uint32_t)rd;
@@ -514,6 +524,12 @@ static void xfer_run(uint16_t file_id, uint32_t offset)
 	(void)fs_close(&f);
 
 	if (pos >= file_size) {
+		/* DONE 事件走 0x23 应答通道，数据走 0x21：先等数据通道
+		 * 排空再发 DONE，保证"事件到=数据已全部发出"（双通道竞态
+		 * 曾致上位机提前结算、尾部缺帧） */
+		if (hub_stream_flush_wait(K_SECONDS(5)) != 0) {
+			printk("XFER,warn,flush_timeout,id=%u\n", file_id);
+		}
 		/* EVENT 0x06 REC_FILE_DONE：file_id(2)+total_bytes(4)+crc32(4) */
 		uint8_t done[11] = {
 			HUB_EVENT_REC_FILE_DONE,

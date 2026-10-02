@@ -190,7 +190,9 @@ class BleWorker(threading.Thread):
         client = BleakClient(
             addr, disconnected_callback=lambda c: self._cb(
                 self.gui._on_conn_state, "dropped", 0, b""),
-            timeout=20.0)
+            timeout=20.0,
+            # Windows 会缓存旧固件的 GATT 表，强制重新做服务发现
+            winrt={"use_cached_services": False})
         try:
             await client.connect()
             self.client = client

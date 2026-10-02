@@ -132,13 +132,21 @@ class HubTest:
 
     async def run(self, quick=False, do_rec=True):
         print("== 扫描 SmartPet ...")
+        # 名字在扫描响应里，Windows 被动扫描常拿不到；同时按服务 UUID 匹配
         dev = await BleakScanner.find_device_by_name("SmartPet", timeout=10)
+        if not dev:
+            dev = await BleakScanner.find_device_by_filter(
+                lambda d, adv: "e5a00020-1e5c-4b8f-9a2d-6c0f7e8d9a0b"
+                in [u.lower() for u in (adv.service_uuids or [])],
+                timeout=10)
         if not dev:
             report("扫描发现设备", False, "未找到 SmartPet")
             return
         report("扫描发现设备", True, dev.address)
 
-        async with BleakClient(dev, timeout=15) as cli:
+        # Windows 会缓存旧固件的 GATT 表，强制走 uncached 服务发现
+        async with BleakClient(dev, timeout=15,
+                               winrt={"use_cached_services": False}) as cli:
             report("BLE 连接", cli.is_connected, f"MTU={cli.mtu_size}")
 
             info = await cli.read_gatt_char(UUID_INFO)

@@ -123,6 +123,17 @@ bool hub_connected(void);
 void hub_file_xfer_mode(bool on);
 
 /**
+ * @brief 等待数据流通道排空（帧缓冲与挂起包均已交给控制器）
+ *
+ * REC_READ 发 DONE 事件前调用，保证"事件到=数据已全部发出"，
+ * 消除 0x21 数据 / 0x23 事件双通道竞态（上板实测尾部缺帧根因）。
+ *
+ * @param timeout 最长等待
+ * @return 0 已排空；-EAGAIN 超时未排空
+ */
+int hub_stream_flush_wait(k_timeout_t timeout);
+
+/**
  * @brief LED override 查询（main 循环 LED 仲裁第 4 级用）
  *
  * @param mask 输出显示位图（bit0=LED0 bit1=LED1）
