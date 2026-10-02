@@ -4,7 +4,7 @@
 宠物环传感器控制 —— 上位机 DEMO（模拟数据版，无真实 BLE）
 
 用途：评审 GUI 布局与功能集。所有数据由内置模拟器产生，
-点击"连接"后开始出数；界面元素与《宠物环传感器控制_通信协议》V0.3 一一对应。
+点击"连接"后开始出数；界面元素与《宠物环传感器控制_通信协议》V0.4 一一对应。
 
 运行：py host/petring_console_demo.py   或  host\\run_demo.bat
 （依赖标准库 tkinter：python.org 安装的系统 Python 自带；
@@ -18,14 +18,13 @@
   LED 控制      ↔ CMD 0x01 LED_SET
   电源域控制    ↔ CMD 0x02 PWR_SET（单开/单关/全开/全关测试矩阵）
   六轴×2        ↔ TYPE 0x01/0x02；总览=六分量多色合成图，分量=下拉选单轴大图
-                （面板含在位灯/|a|·|g|合成量/采样帧数；U1 可演示 ABSENT 灰显）
+                （轴名分色、数值大号加粗、RMS |a|/|g| 统计；U1 可演示 ABSENT 灰显）
   QVAR×2        ↔ TYPE 0x03 + CMD 0x08 QVAR_THR_SET + EVENT 0x04 阈值触发
   PVDF          ↔ TYPE 0x04 heart/raw/ref mV + 波形
-  SD 存储测试   ↔ CSNP1GCR01-BOW SD NAND：CMD 0x0D SD_INFO / 0x0E SD_TEST
-                （写数据→读回→CRC 校验自测 + 容量/文件列表，V0.5 提案）
-  电池页签      ↔ 大字 SOC/VBAT/充放态 + 充放电历史曲线（X=时间，双 Y 轴分色）
-  SD 卡测试     ↔ 拟新增 CMD 0x0D SD_TEST（写伪随机图样→读回逐块校验）
+  SD 卡测试     ↔ CSNP1GCR01-BOW SD NAND（128MB/SPI 4线/FAT32）：
+                拟新增 CMD 0x0D SD_TEST（写伪随机图样→读回逐块校验）
                  + 0x09 REC_LIST / 0x0A 下载 / 0x0B 删除 文件管理
+  电池页签      ↔ 大字 SOC/VBAT/充放态 + 充放电历史曲线（X=时间，双 Y 轴分色）
   麦克风录音    ↔ CMD 0x07 REC_CTRL（声道/时长/启停）+ 0x0A REC_READ 下载后本地播放
   帧监视        ↔ e5a00021 Notify 原始帧（SYNC/TYPE/SEQ/LEN/PAYLOAD/CRC8）
   指令终端      ↔ e5a00022 Write + e5a00023 CMD_ACK
@@ -1038,6 +1037,7 @@ class PetRingConsole(tk.Tk):
         ttk.Label(row, text="  快捷:").pack(side="left")
         for label, cmd, params in (("LED0开", "01", "01"), ("LED全关", "01", "00"),
                                    ("GET_STATUS", "10", ""), ("GET_VERSION", "11", ""),
+                                   ("SD_TEST", "0D", "04 01"),
                                    ("PING", "7F", "DE AD BE EF")):
             ttk.Button(row, text=label,
                        command=lambda c=cmd, p=params: self.on_cmd_quick(c, p)
@@ -1304,6 +1304,13 @@ class PetRingConsole(tk.Tk):
                         ui["ws"].redraw()
                     self._emit_frame(0x01 if key == "U4" else 0x02,
                                      struct.pack("<B6h", 1, *f))
+                else:
+                    # 不在位：数值灰显为 —，统计复位，波形保持最后一帧
+                    for lbl in self.imu_vals[key]:
+                        lbl.configure(text="—")
+                    self.imu_stats[key].configure(
+                        text="RMS |a|   — mg\nRMS |g|   — dps")
+                    self._imu_hist[key].clear()
             # QVAR
             a, b = lk.qvar_sample()
             for ch, v in (("A", a), ("B", b)):
