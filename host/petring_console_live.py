@@ -252,6 +252,9 @@ class PetRingLive(PetRingConsole):
         self.xfer_target = None             # 正在下载的 file_id
         self.sd_testing = False
         self._rec_pending = False
+        self._rx_buf = []                   # 帧监视行缓存（_tick 批量刷）
+        self._rd_marks = []                 # 待重绘波形（_tick 批量刷）
+        self._rd_marked = set()
         self.worker = BleWorker(self)
         self.worker.start()
         self._rewire_demo_only()
@@ -648,10 +651,10 @@ class PetRingLive(PetRingConsole):
             text=f"RMS |a| {rms_a:5.0f} mg\nRMS |g| {rms_g:5.1f} dps")
         ui = self.imu_ui[key]
         if ui["mode"].get() == "overview":
-            ui["wa"].redraw()
-            ui["wg"].redraw()
+            self._rd(ui["wa"])
+            self._rd(ui["wg"])
         else:
-            ui["ws"].redraw()
+            self._rd(ui["ws"])
 
     def _h_imu_u4(self, payload):
         self._h_imu("U4", payload)
@@ -663,22 +666,25 @@ class PetRingLive(PetRingConsole):
         if len(payload) < 6:
             return
         st, a, b, valid = struct.unpack("<BhhB", payload[:6])
+        changed = False
         for ch, v, bit in (("A", a, 1), ("B", b, 2)):
             mk = f"QVAR_{ch}"
             nst = 1 if (valid & bit) else (3 if st == 3 else 2)
             if self.link.mod_state[mk] != nst:
                 self.link.mod_state[mk] = nst
+                changed = True
             if valid & bit:
                 self.qvar_vals[ch].configure(text=str(v))
                 self.qvar_waves[ch].push(v)
-                self.qvar_waves[ch].redraw()
+                self._rd(self.qvar_waves[ch])
                 alarm = abs(v) > self.link.qvar_thr[ch]
                 self.qvar_lamps[ch].configure(
                     fg="#e74c3c" if alarm else "#3a4148")
             else:
                 self.qvar_vals[ch].configure(text="—")
                 self.qvar_lamps[ch].configure(fg="#3a4148")
-        self._refresh_mod_lamps()
+        if changed:
+            self._refresh_mod_lamps()
 
     def _h_pvdf(self, payload):
         if len(payload) < 13:
@@ -695,9 +701,9 @@ class PetRingLive(PetRingConsole):
         self.pvdf_vals["raw_mv"].configure(text=str(raw))
         self.pvdf_vals["ref_mv"].configure(text=str(ref))
         self.pvdf_wave.push(heart - ref)
-        self.pvdf_wave.redraw()
+        self._rd(self.pvdf_wave)
         self.pvdf_wave2.push(raw - ref)
-        self.pvdf_wave2.redraw()
+        self._rd(self.pvdf_wave2)
 
     def _h_temp(self, payload):
         if len(payload) < 3:
@@ -754,13 +760,16 @@ class PetRingLive(PetRingConsole):
             # 中间丢块：放弃本次，等待下轮或重传
             self.log(f"下载 file_id={fid} 丢块（期望 @{len(buf)} "
                      f"实到 @{offset}），将自动断点续传。")
-        # 进度（有列表估算大小时）
+        # 进度（有列表估算大小时；节流，每 ~8 块刷一次 UI）
         kb = next((f[2] for f in self.link.sd_files if f[0] == fid), 0)
         if kb:
-            pct = min(100, len(buf) / (kb * 1024) * 100)
-            self.sd_prog.configure(mode="determinate", value=pct)
-            self.lbl_sd_status.configure(
-                text=f"下载 file_id={fid}：{len(buf) // 1024} / ~{kb} KB")
+            ent["ui_n"] = ent.get("ui_n", 0) + 1
+            if ent["ui_n"] >= 8:
+                ent["ui_n"] = 0
+                pct = min(100, len(buf) / (kb * 1024) * 100)
+                self.sd_prog.configure(mode="determinate", value=pct)
+                self.lbl_sd_status.configure(
+                    text=f"下载 file_id={fid}：{len(buf) // 1024} / ~{kb} KB")
 
     _STREAM_H = {0x01: _h_imu_u4, 0x02: _h_imu_u1, 0x03: _h_qvar,
                  0x04: _h_pvdf, 0x05: _h_temp, 0x06: _h_mic,
@@ -890,20 +899,45 @@ class PetRingLive(PetRingConsole):
         frame = bytes([0x55, 0xAA]) + body + bytes([crc8(body)])
         hexs = " ".join(f"{b:02X}" for b in frame)
         tag = "0x21" if ch == 0x21 else "0x23"
-        self.frame_txt.insert(
-            "end",
+        # 只入缓存，_tick 每 100ms 批量刷一次（逐帧 insert+see 在
+        # ~200 帧/s 数据流下会吃满主线程导致界面卡死）
+        self._rx_buf.append(
             f"[{tag} 0x{ftype:02X} {TYPE_NAMES.get(ftype, '?'):13s}"
             f" #{seq:3d}] {hexs}\n")
-        lines = int(self.frame_txt.index("end-1c").split(".")[0])
-        if lines > 500:
-            self.frame_txt.delete("1.0", "250.0")
-        self.frame_txt.see("end")
+        if len(self._rx_buf) > 300:
+            del self._rx_buf[:100]          # 洪峰丢弃最旧，防积压
+
+    def _rd(self, w):
+        """波形重绘节流：只标脏，_tick 里统一重绘（每画布每 100ms 至多一次）"""
+        if id(w) not in self._rd_marked:
+            self._rd_marked.add(id(w))
+            self._rd_marks.append(w)
+
+    def _flush_ui(self):
+        buf = self._rx_buf
+        if buf:
+            self._rx_buf = []
+            self.frame_txt.insert("end", "".join(buf))
+            lines = int(self.frame_txt.index("end-1c").split(".")[0])
+            if lines > 500:
+                self.frame_txt.delete("1.0", "250.0")
+            self.frame_txt.see("end")
+        if self._rd_marks:
+            waves = self._rd_marks
+            self._rd_marks = []
+            self._rd_marked = set()
+            for w in waves:
+                try:
+                    w.redraw()
+                except Exception:
+                    pass
 
     def _emit_frame(self, ftype, payload):  # demo 残留接口，正式版不用
         pass
 
     # ---------------- 周期刷新 ----------------
     def _tick(self):
+        self._flush_ui()
         lk = self.link
         # 电池：仅显示真实帧数据（未连接/未收到时显示 —）
         # 注：super().__init__ 期间 link 仍是 SimLink，用 getattr 兼容
