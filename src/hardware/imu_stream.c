@@ -17,7 +17,7 @@
  */
 #include "imu_stream.h"
 
-#if CONFIG_APP_BLE_IMU_STREAM
+#if CONFIG_APP_SENSOR_HUB
 
 #include <errno.h>
 
@@ -315,9 +315,9 @@ size_t imu_stream_drain(struct imu_frame *dst, size_t max)
 	return n;
 }
 
-#else /* !CONFIG_APP_BLE_IMU_STREAM */
+#else /* !CONFIG_APP_SENSOR_HUB */
 
-/* 关闭时保留空实现，上层（ble_imu_service）同样受开关控制，不会调用 */
+/* 关闭时保留空实现，上层（sensor_hub_bridge）同样受开关控制，不会调用 */
 
 int imu_stream_start(void) { return -ENOTSUP; }
 void imu_stream_stop(void) { }
@@ -330,4 +330,4 @@ size_t imu_stream_drain(struct imu_frame *dst, size_t max)
 	return 0;
 }
 
-#endif /* CONFIG_APP_BLE_IMU_STREAM */
+#endif /* CONFIG_APP_SENSOR_HUB */

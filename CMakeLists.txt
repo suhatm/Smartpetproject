@@ -4,9 +4,9 @@ project(smartpetring_power_ui)
 
 target_sources(app PRIVATE
     src/app/main.c
-    src/app/test_mailbox.c
-    src/bluetooth/ble_led_service.c
-    src/bluetooth/ble_imu_service.c
+    src/app/sensor_hub_bridge.c
+    src/app/recorder.c
+    src/bluetooth/ble_sensor_hub.c
     src/hardware/power_control.c
     src/hardware/status_led.c
     src/hardware/imu_sensor.c
@@ -18,9 +18,11 @@ target_sources(app PRIVATE
     src/hardware/body_imu.c
     src/hardware/qvar_sensor.c
     src/hardware/pvdf_adc.c
+    src/hardware/batt_gauge.c
 )
 
 target_include_directories(app PRIVATE
+    src/app
     src/bluetooth
     src/hardware
 )

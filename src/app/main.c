@@ -34,12 +34,13 @@
 #include "power_control.h"
 #include "status_led.h"
 #include "app_watchdog.h"
+#include "sensor_hub_bridge.h"
+#include "ble_sensor_hub.h"
 #if CONFIG_APP_IMU_TEST
 #include "imu_sensor.h"
 #endif
 #if CONFIG_APP_TEMP_TEST
 #include "temp_sensor.h"
-#include "ble_imu_service.h"
 #endif
 #if CONFIG_APP_SD_TEST
 #include "sd_store.h"
@@ -55,12 +56,6 @@
 #endif
 #if CONFIG_APP_PVDF_TEST
 #include "pvdf_adc.h"
-#endif
-#if CONFIG_APP_BLE_LED_TEST
-#include "ble_led_service.h"
-#endif
-#if CONFIG_APP_POWER_DOMAIN_TEST_MB
-#include "test_mailbox.h"
 #endif
 #if CONFIG_APP_HW_WATCHDOG
 #include <nrfx.h> /* NRF_RESET->RESETREAS（nRF54L 无 hwinfo 驱动，裸读） */
@@ -256,11 +251,9 @@ static void request_graceful_shutdown(void)
 
 	printk("POWER_BUTTON,action=shutdown_requested\n");
 
-#if CONFIG_APP_BLE_LED_TEST
 	/* 关机前断开蓝牙连接并停止广播（方案 §3.3）：
 	 * 蓝闪指示与进 Ship 之后设备不再对外可见 */
-	ble_led_test_shutdown();
-#endif
+	sensor_hub_shutdown();
 
 	/* 1. 关闭所有电源轨并回读校验 */
 	ret = power_domains_all_off();
@@ -427,18 +420,16 @@ static int update_led_pattern(int64_t now_ms)
 		/* 注意：只表示 USB/仅充电模式，不代表实际充电电流 */
 		red = ((uint32_t)now_ms % 1000U) < 500U;
 	} else {
-#if CONFIG_APP_BLE_LED_TEST
-		/* BLE 测试 override（方案 §3.3 仲裁第 4 级）：
+		/* BLE LED_SET override（方案 §3.3 仲裁第 4 级，协议 LED_SET）：
 		 * 仅在 ACTIVE 且无按键/充电/故障抢占时可见，
 		 * 覆盖心跳层；断开连接后 override 自动清除回落原逻辑 */
 		uint8_t ble_mask;
 
-		if (ble_led_override_get(&ble_mask)) {
+		if (hub_led_override_get(&ble_mask)) {
 			return status_led_set(
 				(ble_mask & 0x01U) != 0U,
 				(ble_mask & 0x02U) != 0U);
 		}
-#endif
 #if CONFIG_APP_HEARTBEAT_LED
 		/* ACTIVE：心跳指示——每 HEARTBEAT_PERIOD_MS 双灯同亮 HEARTBEAT_FLASH_MS */
 		uint32_t beat = (uint32_t)now_ms % HEARTBEAT_PERIOD_MS;
@@ -490,6 +481,10 @@ int main(void)
 		       (cause & RESET_RESETREAS_RESETPIN_Msk) ? ",pin" : "",
 		       (cause & RESET_RESETREAS_CTRLAPSOFT_Msk) ? ",ctrl_soft" : "",
 		       (cause & RESET_RESETREAS_CTRLAPHARD_Msk) ? ",ctrl_hard" : "");
+		/* 看门狗复位原因留给 bridge：上位机订阅后经 EVENT 0x02 上报 */
+		if (cause & (RESET_RESETREAS_DOG0_Msk | RESET_RESETREAS_DOG1_Msk)) {
+			sensor_hub_bridge_report_wdt_reset(cause);
+		}
 		/* 写 1 清除，避免下次启动重复报告 */
 		NRF_RESET->RESETREAS = cause;
 	}
@@ -514,12 +509,6 @@ int main(void)
 		printk("FATAL,initialization_failed,rc=%d\n", ret);
 		return ret;
 	}
-
-#if CONFIG_APP_POWER_DOMAIN_TEST_MB
-	/* 2.5 SWD 测试邮箱：上位机（tools/power_domain_test.py）经调试器
-	 * 直接读写 RAM 邮箱下发三电源域独立开关命令 */
-	test_mailbox_init();
-#endif
 
 #if CONFIG_APP_BOOT_LED_INDICATION
 	/* 3. 开机指示：LED0（红）闪烁 3 秒 */
@@ -623,15 +612,14 @@ int main(void)
 		printk("SYSTEM_STATE,mode=active,vbus=0,rails=off\n");
 	}
 
-#if CONFIG_APP_BLE_LED_TEST
-	/* 7.5 蓝牙从机初始化（异步：栈就绪后自动开始广播）。
+	/* 7.5 Sensor Hub 初始化（task-V1.06：蓝牙+电量计+采集调度，
+	 * 异步：栈就绪后自动开始广播）。
 	 * 失败仅告警不进 FAULT——蓝牙为附加功能，电源 UI 主流程
 	 * 必须继续（方案 §7 风险 6）。 */
-	ret = ble_led_test_init();
+	ret = sensor_hub_bridge_init();
 	if (ret != 0) {
-		printk("WARN,ble_init_failed,rc=%d\n", ret);
+		printk("WARN,hub_init_failed,rc=%d\n", ret);
 	}
-#endif
 
 	printk("LED_MAP,red=nPM1300_LED0,blue=nPM1300_LED1\n");
 	printk("LED_PATTERN,boot=red_blink_3s,ready=both_blink_3s,"
@@ -640,9 +628,7 @@ int main(void)
 	printk("LED_PATTERN,heartbeat=both_flash_%ums_every_%ums\n",
 	       HEARTBEAT_FLASH_MS, HEARTBEAT_PERIOD_MS);
 #endif
-#if CONFIG_APP_BLE_LED_TEST
-	printk("BLE,svc=e5a00001,chr=e5a00002,name=SmartPet\n");
-#endif
+	printk("HUB,svc=e5a00020,data=0x21,cmd=0x22,ack=0x23,info=0x24\n");
 	printk("BUTTON_UI,short=status_ack,hold_1s=arming_red,"
 	       "hold_3s=release_to_ship_red_blue\n");
 
@@ -666,7 +652,6 @@ int main(void)
 			int32_t mdeg;
 
 			if (temp_read_mdeg(&mdeg) == 0) {
-				ble_imu_service_notify_temp(mdeg);
 				if ((temp_print_div++ % 10) == 0) {
 					printk("TEMP,now=%d.%02dC\n",
 					       (int)(mdeg / 1000),
@@ -674,9 +659,6 @@ int main(void)
 				}
 			}
 		}
-#endif
-#if CONFIG_APP_POWER_DOMAIN_TEST_MB
-		test_mailbox_poll();            /* SWD 测试邮箱命令 */
 #endif
 		k_sleep(K_MSEC(LOOP_PERIOD_MS));
 	}

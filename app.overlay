@@ -90,6 +90,24 @@
 
 		/* 保留 nPM1300 10 s 长按应急 power-cycle 复位 */
 		long-press-reset = "one-button";
+
+		/*
+		 * 充电器子节点（task-V1.06 电量计，batt_gauge.c 使用）：
+		 * 提供 SENSOR_CHAN_GAUGE_VOLTAGE / GAUGE_AVG_CURRENT /
+		 * GAUGE_TEMP / NPM13XX_CHARGER_STATUS 采样通道。
+		 * 参数按宠物环小容量锂电池（标定后按实测调整）：
+		 *   满充 4.2V、充电电流 100mA、NTC 10k/B3380。
+		 */
+		npm1300_charger: charger {
+			compatible = "nordic,npm1300-charger";
+			term-microvolt = <4200000>;
+			current-microamp = <100000>;
+			dischg-limit-microamp = <1000000>;
+			vbus-limit-microamp = <500000>;
+			thermistor-ohms = <10000>;
+			thermistor-beta = <3380>;
+			charging-enable;
+		};
 	};
 };
 
