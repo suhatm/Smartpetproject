@@ -13,7 +13,7 @@
 功能映射：
   连接面板      ↔ 扫描/连接/MTU/RSSI
   电池电量      ↔ TYPE 0x08 BATTERY + CMD 0x0C GET_BATTERY + EVENT 0x02 低电
-                （数据源 nPM1300 电量计；电压/百分比/充放电态/低电告警）
+                （nPM1300 库仑计 SOC：SOC 积分为主、电压经 OCV 曲线反查）
   模块状态灯    ↔ MODULE_STATUS 帧 0x10（UNKNOWN/PRESENT/ABSENT/DEGRADED）
   LED 控制      ↔ CMD 0x01 LED_SET
   电源域控制    ↔ CMD 0x02 PWR_SET（单开/单关/全开/全关测试矩阵）
@@ -58,30 +58,42 @@ class SimLink:
         self.rec_channels = (True, True)             # L, R
         self.rec_file = None                          # 录完生成的 wav 路径
         self.seq = {}                                 # 每 TYPE 独立序号
-        # ---- 电池（模拟 nPM1300 电量计，协议 V0.3 TYPE 0x08 BATTERY）----
-        self.batt_mv = 4050                           # VBAT mV（3.3~4.2V 锂电）
+        # ---- 电池（模拟 nPM1300 库仑计 SOC，协议 V0.3 TYPE 0x08 BATTERY）----
+        # 算法语义对齐固件 nrf_fuel_gauge：SOC 为状态量（电流积分），
+        # 电压由 SOC 经锂电开路电压曲线反查（非线性平台期），不再用电压线性映射。
+        self.batt_soc = 83.0                          # SOC %（0~100 浮点）
         self.batt_charging = False                    # 充电中标志
         self.batt_low_warned = False                  # 低电 EVENT 去抖
 
-    BATT_EMPTY_MV, BATT_FULL_MV = 3300, 4200          # 锂电窗口
     BATT_LOW_PCT = 15                                 # 低电告警门限 %
+    # 锂电典型开路电压曲线（SOC% → mV），分段线性插值
+    _OCV_TABLE = ((0, 3300), (5, 3450), (10, 3550), (20, 3650),
+                  (50, 3780), (80, 3980), (95, 4120), (100, 4200))
 
     def batt_percent(self):
-        p = (self.batt_mv - self.BATT_EMPTY_MV) / \
-            (self.BATT_FULL_MV - self.BATT_EMPTY_MV) * 100
-        return max(0, min(100, int(p)))
+        return max(0, min(100, int(round(self.batt_soc))))
+
+    def batt_voltage_mv(self):
+        """由 SOC 反查开路电压（模拟 nrf_fuel_gauge 的 vbat 输出）。"""
+        s = max(0.0, min(100.0, self.batt_soc))
+        tab = self._OCV_TABLE
+        for i in range(1, len(tab)):
+            if s <= tab[i][0]:
+                s0, v0 = tab[i - 1]
+                s1, v1 = tab[i]
+                return int(v0 + (v1 - v0) * (s - s0) / (s1 - s0))
+        return tab[-1][1]
 
     def battery_sample(self, dt_s):
-        """充放电模拟：充电 +1.2mV/s，放电 -0.25mV/s（满载更快），返回
-        (vbat_mv, percent, charging)。"""
+        """SOC 电流积分模拟：充电 +0.14%/s（约 12 分钟+10%），
+        放电 -0.03%/s 基础 + 负载加权（电源域/LED 越多掉电越快）。
+        返回 (vbat_mv, percent, charging)。"""
         if self.batt_charging:
-            self.batt_mv = min(self.BATT_FULL_MV,
-                               self.batt_mv + 1.2 * dt_s)
+            self.batt_soc = min(100.0, self.batt_soc + 0.14 * dt_s)
         else:
-            load = sum(self.pwr.values()) * 0.05 + sum(self.led) * 0.02
-            self.batt_mv = max(self.BATT_EMPTY_MV,
-                               self.batt_mv - (0.25 + load) * dt_s)
-        return int(self.batt_mv), self.batt_percent(), self.batt_charging
+            load = sum(self.pwr.values()) * 0.012 + sum(self.led) * 0.005
+            self.batt_soc = max(0.0, self.batt_soc - (0.03 + load) * dt_s)
+        return self.batt_voltage_mv(), self.batt_percent(), self.batt_charging
 
     # ---- 传感器模拟 ----
     def imu_frame(self, base_pitch):
