@@ -17,9 +17,11 @@
   模块状态灯    ↔ MODULE_STATUS 帧 0x10（UNKNOWN/PRESENT/ABSENT/DEGRADED）
   LED 控制      ↔ CMD 0x01 LED_SET
   电源域控制    ↔ CMD 0x02 PWR_SET（单开/单关/全开/全关测试矩阵）
-  六轴×2        ↔ TYPE 0x01/0x02（U1 柔性板可演示 ABSENT 灰显）
+  六轴×2        ↔ TYPE 0x01/0x02；总览=六分量多色合成图，分量=下拉选单轴大图
+                （U1 柔性板可演示 ABSENT 灰显）
   QVAR×2        ↔ TYPE 0x03 + CMD 0x08 QVAR_THR_SET + EVENT 0x04 阈值触发
   PVDF          ↔ TYPE 0x04 heart/raw/ref mV + 波形
+  电池页签      ↔ 大字 SOC/VBAT/充放态 + 充放电历史曲线（X=时间，双 Y 轴分色）
   麦克风录音    ↔ CMD 0x07 REC_CTRL（声道/时长/启停）+ 0x0A REC_READ 下载后本地播放
   帧监视        ↔ e5a00021 Notify 原始帧（SYNC/TYPE/SEQ/LEN/PAYLOAD/CRC8）
   指令终端      ↔ e5a00022 Write + e5a00023 CMD_ACK
@@ -198,6 +200,169 @@ class WaveCanvas(tk.Canvas):
                 pts += [x0 + i, y_of(v)]
             self.create_line(*pts, fill=self.color, width=1.4)
 
+# ---------------------------------------------------------------- 多序列波形
+
+class MultiWaveCanvas(tk.Canvas):
+    """多序列波形画布：同一量纲的多条曲线（如 ax/ay/az）分色显示，带图例。"""
+
+    def __init__(self, master, title="", unit="", ymin=-100, ymax=100,
+                 series=(("s1", "#2ecc71"),), width=340, height=110, **kw):
+        super().__init__(master, width=width, height=height,
+                         bg="#101418", highlightthickness=1,
+                         highlightbackground="#3a4148", **kw)
+        self.unit = unit
+        self.ymin, self.ymax = ymin, ymax
+        self.w, self.h = width, height
+        self.title = title
+        self.series = [(nm, c, []) for nm, c in series]
+        self._draw_frame()
+
+    def set_range(self, ymin, ymax):
+        self.ymin, self.ymax = ymin, ymax
+
+    def push(self, values):
+        for (_, _, buf), v in zip(self.series, values):
+            buf.append(v)
+            if len(buf) > self.w:
+                buf.pop(0)
+
+    def clear(self):
+        for _, _, buf in self.series:
+            buf.clear()
+        self._draw_frame()
+
+    def _y_of(self, v):
+        span = (self.ymax - self.ymin) or 1
+        v = max(self.ymin, min(self.ymax, v))
+        return self.h - 8 - (v - self.ymin) / span * (self.h - 30)
+
+    def _draw_frame(self):
+        self.delete("all")
+        self.create_text(6, 4, anchor="nw", fill="#9aa4ad",
+                         font=("微软雅黑", 8), text=self.title)
+        if self.unit:
+            self.create_text(self.w - 6, 4, anchor="ne", fill="#9aa4ad",
+                             font=("微软雅黑", 8), text=self.unit)
+        # 图例（标题右侧）
+        lx = 6 + len(self.title) * 9 + 10
+        for nm, color, _ in self.series:
+            self.create_line(lx, 10, lx + 12, 10, fill=color, width=2)
+            self.create_text(lx + 15, 10, anchor="w", fill=color,
+                             font=("Consolas", 7), text=nm)
+            lx += 15 + len(nm) * 8 + 14
+
+    def redraw(self):
+        self._draw_frame()
+        # 零线
+        if self.ymin < 0 < self.ymax:
+            y0 = self._y_of(0)
+            self.create_line(0, y0, self.w, y0, fill="#2c343c")
+        for _, color, buf in self.series:
+            n = len(buf)
+            if n >= 2:
+                pts = []
+                x0 = self.w - n
+                for i, v in enumerate(buf):
+                    pts += [x0 + i, self._y_of(v)]
+                self.create_line(*pts, fill=color, width=1.3)
+
+# ---------------------------------------------------------------- 双 Y 轴时间图表
+
+class DualAxisChart(tk.Canvas):
+    """充放电历史图：X 轴时间，左 Y 轴序列 1（电压）、右 Y 轴序列 2（电量），
+    两序列不同颜色，带网格与图例。"""
+
+    ML, MR, MT, MB = 52, 52, 26, 22      # 四边留白（左右各放一根 Y 轴）
+
+    def __init__(self, master, title="",
+                 y1=("", -1, 1, "#f1c40f"), y2=("", 0, 100, "#2ecc71"),
+                 width=900, height=300, **kw):
+        super().__init__(master, width=width, height=height,
+                         bg="#101418", highlightthickness=1,
+                         highlightbackground="#3a4148", **kw)
+        self.title = title
+        self.y1_name, self.y1_min, self.y1_max, self.c1 = y1
+        self.y2_name, self.y2_min, self.y2_max, self.c2 = y2
+        self.w, self.h = width, height
+        self.maxlen = width - self.ML - self.MR
+        self.ts, self.v1, self.v2 = [], [], []
+        self._draw_frame()
+
+    def push(self, t, val1, val2):
+        self.ts.append(t)
+        self.v1.append(val1)
+        self.v2.append(val2)
+        if len(self.ts) > self.maxlen:
+            self.ts.pop(0); self.v1.pop(0); self.v2.pop(0)
+
+    def clear(self):
+        self.ts.clear(); self.v1.clear(); self.v2.clear()
+        self._draw_frame()
+
+    def _pw(self):
+        return self.w - self.ML - self.MR
+
+    def _ph(self):
+        return self.h - self.MT - self.MB
+
+    def _y_of(self, v, lo, hi):
+        v = max(lo, min(hi, v))
+        return self.MT + self._ph() - (v - lo) / ((hi - lo) or 1) * self._ph()
+
+    def _draw_frame(self):
+        self.delete("all")
+        pw, ph = self._pw(), self._ph()
+        self.create_text(self.ML, 6, anchor="nw", fill="#9aa4ad",
+                         font=("微软雅黑", 8), text=self.title)
+        # 图例（右上）
+        lx = self.w - self.MR - 150
+        for nm, c in ((self.y1_name, self.c1), (self.y2_name, self.c2)):
+            self.create_line(lx, 10, lx + 14, 10, fill=c, width=2)
+            self.create_text(lx + 17, 10, anchor="w", fill=c,
+                             font=("微软雅黑", 8), text=nm)
+            lx += 17 + len(nm) * 9 + 22
+        # 横向网格 + 双 Y 轴刻度（各 5 档）
+        for i in range(5):
+            frac = i / 4
+            y = self.MT + ph - frac * ph
+            self.create_line(self.ML, y, self.ML + pw, y, fill="#232a31")
+            v1 = self.y1_min + frac * (self.y1_max - self.y1_min)
+            v2 = self.y2_min + frac * (self.y2_max - self.y2_min)
+            self.create_text(self.ML - 6, y, anchor="e", fill=self.c1,
+                             font=("Consolas", 7), text=f"{v1:.0f}")
+            self.create_text(self.ML + pw + 6, y, anchor="w", fill=self.c2,
+                             font=("Consolas", 7), text=f"{v2:.0f}")
+        # Y 轴名
+        self.create_text(self.ML - 6, self.MT - 8, anchor="e", fill=self.c1,
+                         font=("微软雅黑", 7), text="mV")
+        self.create_text(self.ML + pw + 6, self.MT - 8, anchor="w",
+                         fill=self.c2, font=("微软雅黑", 7), text="%")
+
+    def redraw(self):
+        self._draw_frame()
+        n = len(self.ts)
+        if n < 2:
+            return
+        pw = self._pw()
+        x0 = self.ML + pw - n
+        # X 轴时间刻度（5 档，HH:MM:SS）
+        for i in range(5):
+            idx = int(i / 4 * (n - 1))
+            x = x0 + idx
+            self.create_line(x, self.MT, x, self.MT + self._ph(),
+                             fill="#1d2329")
+            self.create_text(x, self.h - self.MB + 4, anchor="n",
+                             fill="#7f8c8d", font=("Consolas", 7),
+                             text=time.strftime("%H:%M:%S",
+                                                time.localtime(self.ts[idx])))
+        # 两条曲线
+        for vals, lo, hi, c in ((self.v1, self.y1_min, self.y1_max, self.c1),
+                                (self.v2, self.y2_min, self.y2_max, self.c2)):
+            pts = []
+            for i, v in enumerate(vals):
+                pts += [x0 + i, self._y_of(v, lo, hi)]
+            self.create_line(*pts, fill=c, width=1.6)
+
 # ---------------------------------------------------------------- 主窗口
 
 class PetRingConsole(tk.Tk):
@@ -207,15 +372,14 @@ class PetRingConsole(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("宠物环传感器控制  v0.1 DEMO（模拟数据）")
+        self.title("宠物环传感器控制  v0.2 DEMO（模拟数据）")
         self.configure(bg=self.BG)
-        self.geometry("1180x760")
+        self.geometry("1320x840")
+        self.minsize(1180, 760)
         self.link = SimLink()
         self._style()
         self._build_top()
-        self._build_left_status()
-        self._build_control_area()
-        self._build_tabs()
+        self._build_body()
         self._build_log()
         self._tick()
 
@@ -232,26 +396,38 @@ class PetRingConsole(tk.Tk):
                      foreground="#ffffff")
         st.configure("TButton", font=("微软雅黑", 9), padding=(10, 4))
         st.configure("TCheckbutton", background=self.BG, foreground=self.FG)
+        st.configure("TRadiobutton", background=self.BG, foreground=self.FG)
+        st.configure("TLabelframe", background=self.BG, foreground="#9fd3a8",
+                     bordercolor="#3a4148")
+        st.configure("TLabelframe.Label", background=self.BG,
+                     foreground="#8ab4f8", font=("微软雅黑", 9, "bold"))
+        st.configure("TSeparator", background="#3a4148")
 
     # ---------------- 顶部连接栏 ----------------
     def _build_top(self):
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=10, pady=(8, 4))
+        outer = ttk.Frame(self)
+        outer.pack(fill="x", padx=10, pady=(8, 2))
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x")
         ttk.Label(bar, text="设备:", style="Header.TLabel").pack(side="left")
         self.dev_var = tk.StringVar(value="SmartPet")
         ttk.Combobox(bar, textvariable=self.dev_var, width=14, state="readonly",
-                     values=["SmartPet"]).pack(side="left", padx=(4, 12))
+                     values=["SmartPet"]).pack(side="left", padx=(4, 8))
         self.btn_scan = ttk.Button(bar, text="扫描", command=self.on_scan)
         self.btn_scan.pack(side="left")
         self.btn_conn = ttk.Button(bar, text="连接", command=self.on_connect)
         self.btn_conn.pack(side="left", padx=6)
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y",
+                                                   padx=12, pady=2)
         self.lbl_mtu = ttk.Label(bar, text="MTU: —")
-        self.lbl_mtu.pack(side="left", padx=(18, 6))
+        self.lbl_mtu.pack(side="left", padx=(0, 6))
         self.lbl_rssi = ttk.Label(bar, text="RSSI: —")
         self.lbl_rssi.pack(side="left", padx=6)
-        # --- 电池电量（协议 V0.3 TYPE 0x08 BATTERY，源：nPM1300 电量计）---
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y",
+                                                   padx=12, pady=2)
+        # --- 电池电量（协议 V0.4 TYPE 0x08 BATTERY，nPM1300 库仑计 SOC）---
         batt_box = ttk.Frame(bar)
-        batt_box.pack(side="left", padx=(18, 4))
+        batt_box.pack(side="left")
         self.batt_canvas = tk.Canvas(batt_box, width=46, height=18,
                                      bg=self.BG, highlightthickness=0)
         self.batt_canvas.pack(side="left")
@@ -263,6 +439,7 @@ class PetRingConsole(tk.Tk):
         self.lbl_conn = tk.Label(bar, text="● 未连接", fg="#e74c3c",
                                  bg=self.BG, font=("微软雅黑", 11, "bold"))
         self.lbl_conn.pack(side="right")
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(6, 0))
 
     def on_toggle_charge(self):
         self.link.batt_charging = not self.link.batt_charging
@@ -288,31 +465,41 @@ class PetRingConsole(tk.Tk):
             text=f"{pct}%  {mv}mV  {state}",
             foreground=color)
 
+    # ---------------- 主体：左栏状态 + 右列（控制区/页签） ----------------
+    def _build_body(self):
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+        self._build_left_status(body)
+        ttk.Separator(body, orient="vertical").pack(side="left", fill="y",
+                                                    padx=(2, 8))
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True)
+        self._build_control_area(right)
+        self._build_tabs(right)
+
     # ---------------- 左侧模块状态 ----------------
-    def _build_left_status(self):
-        self.left = ttk.Frame(self)
-        self.left.pack(side="left", fill="y", padx=(10, 4), pady=4)
-        ttk.Label(self.left, text="模块状态", style="Header.TLabel").pack(anchor="w")
+    def _build_left_status(self, parent):
+        self.left = ttk.LabelFrame(parent, text=" 模块状态 ", padding=8)
+        self.left.pack(side="left", fill="y", padx=(0, 2))
         self.mod_labels = {}
         names = [("IMU_U4", "主板六轴 U4"), ("IMU_U1", "柔性板六轴 U1"),
                  ("QVAR_A", "静电 A（U1）"), ("QVAR_B", "静电 B（U4）"),
                  ("PVDF", "压电膜链路"), ("TEMP", "温度 U2"),
                  ("MIC", "双麦克风"), ("SD", "SD 卡")]
-        box = ttk.Frame(self.left)
-        box.pack(fill="x", pady=4)
         for key, cn in names:
-            row = ttk.Frame(box)
-            row.pack(fill="x", pady=1)
+            row = ttk.Frame(self.left)
+            row.pack(fill="x", pady=2)
             lamp = tk.Label(row, text="●", fg="#7f8c8d", bg=self.BG,
                             font=("微软雅黑", 12))
             lamp.pack(side="left")
             ttk.Label(row, text=f" {cn}").pack(side="left")
             self.mod_labels[key] = lamp
+        ttk.Separator(self.left, orient="horizontal").pack(fill="x", pady=8)
         ttk.Label(self.left, text="图例：绿=在位 灰=不在位 橙=降级",
-                  font=("微软雅黑", 8)).pack(anchor="w", pady=(2, 8))
+                  font=("微软雅黑", 8)).pack(anchor="w", pady=(0, 6))
         self.btn_fpc = ttk.Button(self.left, text="模拟插/拔柔性板 FPC",
                                   command=self.on_toggle_fpc)
-        self.btn_fpc.pack(fill="x", pady=4)
+        self.btn_fpc.pack(fill="x", pady=2)
         self._refresh_mod_lamps()
 
     def _refresh_mod_lamps(self):
@@ -321,13 +508,13 @@ class PetRingConsole(tk.Tk):
             lamp.configure(fg=colors[self.link.mod_state[k]])
 
     # ---------------- 右侧控制区（LED/电源/录音） ----------------
-    def _build_control_area(self):
-        self.ctrl = ttk.Frame(self)
-        self.ctrl.pack(side="top", fill="x", padx=6, pady=4)
+    def _build_control_area(self, parent):
+        self.ctrl = ttk.Frame(parent)
+        self.ctrl.pack(side="top", fill="x", pady=(0, 4))
 
         # --- LED ---
-        led_f = ttk.LabelFrame(self.ctrl, text=" LED 控制 ", padding=6)
-        led_f.pack(side="left", fill="y", padx=4)
+        led_f = ttk.LabelFrame(self.ctrl, text=" LED 控制 ", padding=8)
+        led_f.pack(side="left", fill="both", padx=(0, 6))
         self.led_lamps = []
         for i, (name, color) in enumerate((("LED0（红）", "#e74c3c"),
                                            ("LED1（蓝）", "#3498db"))):
@@ -346,8 +533,8 @@ class PetRingConsole(tk.Tk):
 
         # --- 电源域 ---
         pwr_f = ttk.LabelFrame(self.ctrl, text=" 电源域控制（SENS/STORE/ANALOG） ",
-                               padding=6)
-        pwr_f.pack(side="left", fill="y", padx=8)
+                               padding=8)
+        pwr_f.pack(side="left", fill="both", padx=6)
         self.pwr_lamps = {}
         for dom in ("SENS", "STORE", "ANALOG"):
             row = ttk.Frame(pwr_f)
@@ -371,8 +558,8 @@ class PetRingConsole(tk.Tk):
 
         # --- 录音 ---
         rec_f = ttk.LabelFrame(self.ctrl, text=" 麦克风录音（录至 SD，下载后本地播放） ",
-                               padding=6)
-        rec_f.pack(side="left", fill="y", padx=4)
+                               padding=8)
+        rec_f.pack(side="left", fill="both", expand=True, padx=(6, 0))
         row1 = ttk.Frame(rec_f)
         row1.pack(fill="x", pady=2)
         self.ch_l = tk.BooleanVar(value=True)
@@ -402,12 +589,13 @@ class PetRingConsole(tk.Tk):
         self.lbl_rec.pack(anchor="w")
 
     # ---------------- 中部页签 ----------------
-    def _build_tabs(self):
-        self.nb = ttk.Notebook(self)
-        self.nb.pack(side="top", fill="both", expand=True, padx=10, pady=4)
+    def _build_tabs(self, parent):
+        self.nb = ttk.Notebook(parent)
+        self.nb.pack(side="top", fill="both", expand=True, pady=(2, 0))
         self._tab_imu()
         self._tab_qvar()
         self._tab_pvdf()
+        self._tab_battery()
         self._tab_frames()
         self._tab_terminal()
 
@@ -415,15 +603,16 @@ class PetRingConsole(tk.Tk):
         tab = ttk.Frame(self.nb)
         self.nb.add(tab, text=" 六轴 IMU ")
         self.imu_vals = {}
-        self.imu_waves = {}
+        self.imu_ui = {}
+        axes = [("ax", "mg"), ("ay", "mg"), ("az", "mg"),
+                ("gx", "dps×10"), ("gy", "dps×10"), ("gz", "dps×10")]
         for idx, (key, title) in enumerate((("U4", "主板 U4"), ("U1", "柔性板 U1"))):
             lf = ttk.LabelFrame(tab, text=f" {title} LSM6DSV16X ", padding=6)
             lf.grid(row=0, column=idx, padx=8, pady=6, sticky="n")
+            # 左列：六分量数值
             grid = ttk.Frame(lf)
-            grid.pack()
+            grid.pack(side="left", fill="y", padx=(0, 8))
             self.imu_vals[key] = []
-            axes = [("ax", "mg"), ("ay", "mg"), ("az", "mg"),
-                    ("gx", "dps×10"), ("gy", "dps×10"), ("gz", "dps×10")]
             for r, (nm, unit) in enumerate(axes):
                 ttk.Label(grid, text=nm).grid(row=r, column=0, sticky="e")
                 v = ttk.Label(grid, text="—", width=10, font=("Consolas", 10))
@@ -431,13 +620,78 @@ class PetRingConsole(tk.Tk):
                 ttk.Label(grid, text=unit, font=("微软雅黑", 8)).grid(
                     row=r, column=2, sticky="w")
                 self.imu_vals[key].append(v)
-            wa = WaveCanvas(lf, title=f"{title} 加速度 ax/ay/az", unit="mg",
-                            ymin=-2200, ymax=2200, color="#2ecc71")
+            # 右列：模式选择 + 画布区
+            right = ttk.Frame(lf)
+            right.pack(side="left", fill="both", expand=True)
+            ctl = ttk.Frame(right)
+            ctl.pack(fill="x", pady=(0, 3))
+            mode_var = tk.StringVar(value="overview")
+            comp_var = tk.StringVar(value="ax")
+            ttk.Radiobutton(ctl, text="总览（六分量合成）", value="overview",
+                            variable=mode_var,
+                            command=lambda k=key: self.on_imu_mode(k)).pack(
+                side="left")
+            ttk.Radiobutton(ctl, text="分量", value="single",
+                            variable=mode_var,
+                            command=lambda k=key: self.on_imu_mode(k)).pack(
+                side="left", padx=(10, 2))
+            comp_cb = ttk.Combobox(
+                ctl, textvariable=comp_var, width=5, state="readonly",
+                values=[nm for nm, _ in axes])
+            comp_cb.pack(side="left")
+            comp_cb.bind("<<ComboboxSelected>>",
+                         lambda e, k=key: self.on_imu_comp(k))
+            comp_cb.configure(state="disabled")
+            # 总览：加速度三分量 + 陀螺仪三分量两张多序列图
+            ov = ttk.Frame(right)
+            wa = MultiWaveCanvas(
+                ov, title=f"{title} 加速度", unit="mg", ymin=-2200, ymax=2200,
+                series=(("ax", "#2ecc71"), ("ay", "#3498db"),
+                        ("az", "#e74c3c")))
             wa.pack(pady=2)
-            wg = WaveCanvas(lf, title=f"{title} 陀螺仪 gx", unit="dps×10",
-                            ymin=-600, ymax=600, color="#e67e22")
+            wg = MultiWaveCanvas(
+                ov, title=f"{title} 陀螺仪", unit="dps×10", ymin=-600,
+                ymax=600,
+                series=(("gx", "#e67e22"), ("gy", "#f1c40f"),
+                        ("gz", "#9b59b6")))
             wg.pack(pady=2)
-            self.imu_waves[key] = (wa, wg)
+            # 分量：单轴大图
+            sg = ttk.Frame(right)
+            ws = WaveCanvas(sg, title=f"{title} ax", unit="mg",
+                            ymin=-2200, ymax=2200, width=380, height=216,
+                            color="#2ecc71")
+            ws.pack(pady=2)
+            self.imu_ui[key] = {"mode": mode_var, "comp": comp_var,
+                                "comp_cb": comp_cb, "ov_frame": ov,
+                                "sg_frame": sg, "wa": wa, "wg": wg,
+                                "ws": ws}
+            ov.pack()          # 默认总览
+
+    def on_imu_mode(self, key):
+        ui = self.imu_ui[key]
+        if ui["mode"].get() == "overview":
+            ui["sg_frame"].pack_forget()
+            ui["ov_frame"].pack()
+            ui["comp_cb"].configure(state="disabled")
+        else:
+            ui["ov_frame"].pack_forget()
+            ui["sg_frame"].pack()
+            ui["comp_cb"].configure(state="readonly")
+            self.on_imu_comp(key)
+
+    def on_imu_comp(self, key):
+        ui = self.imu_ui[key]
+        comp = ui["comp"].get()
+        title = "主板 U4" if key == "U4" else "柔性板 U1"
+        is_gyro = comp.startswith("g")
+        ui["ws"].set_range(-600, 600) if is_gyro else ui["ws"].set_range(
+            -2200, 2200)
+        ui["ws"].title = f"{title} {comp}"
+        ui["ws"].unit = "dps×10" if is_gyro else "mg"
+        ui["ws"].color = {"ax": "#2ecc71", "ay": "#3498db", "az": "#e74c3c",
+                          "gx": "#e67e22", "gy": "#f1c40f",
+                          "gz": "#9b59b6"}[comp]
+        ui["ws"].clear()
 
     def _tab_qvar(self):
         tab = ttk.Frame(self.nb)
@@ -491,14 +745,52 @@ class PetRingConsole(tk.Tk):
             self.pvdf_vals[name] = v
         self.pvdf_wave = WaveCanvas(tab, title="heart - ref（去基线差分）",
                                     unit="mV", ymin=-400, ymax=400,
-                                    width=760, height=180, color="#e74c3c")
+                                    width=1020, height=190, color="#e74c3c")
         self.pvdf_wave.pack(pady=4)
         self.pvdf_wave2 = WaveCanvas(tab, title="raw - ref", unit="mV",
                                     ymin=-400, ymax=400,
-                                    width=760, height=180, color="#f39c12")
+                                    width=1020, height=190, color="#f39c12")
         self.pvdf_wave2.pack(pady=4)
         ttk.Label(tab, text="提示：ANALOG 域断电时链路无输出（波形归零、状态转灰）",
                   font=("微软雅黑", 8)).pack(anchor="w", padx=8)
+
+    def _tab_battery(self):
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text=" 电池电量 ")
+        # 顶部大字状态区
+        top = ttk.LabelFrame(tab, text=" 实时状态（BATTERY 帧 0x08） ",
+                             padding=8)
+        top.pack(fill="x", padx=8, pady=6)
+        self.batt_big = {}
+        for key, label, color in (
+                ("soc", "电量 SOC", "#2ecc71"), ("vbat", "电压 VBAT", "#f1c40f"),
+                ("state", "充放状态", "#3498db")):
+            cell = ttk.Frame(top)
+            cell.pack(side="left", padx=(6, 30))
+            ttk.Label(cell, text=label, font=("微软雅黑", 9)).pack(anchor="w")
+            v = ttk.Label(cell, text="—", font=("Consolas", 18, "bold"),
+                          foreground=color)
+            v.pack(anchor="w")
+            self.batt_big[key] = v
+        ttk.Label(top, text="  低电:").pack(side="left")
+        self.batt_low_lamp = tk.Label(top, text="●", fg="#3a4148", bg=self.BG,
+                                      font=("微软雅黑", 16))
+        self.batt_low_lamp.pack(side="left")
+        ttk.Button(top, text="模拟插/拔充电器",
+                   command=self.on_toggle_charge).pack(side="right", padx=6)
+        # 充放电历史曲线（X=时间，左 Y=电压 mV 黄色，右 Y=电量 % 绿色）
+        chart_f = ttk.LabelFrame(tab, text=" 充放电曲线（X 轴时间） ",
+                                 padding=6)
+        chart_f.pack(fill="both", expand=True, padx=8, pady=4)
+        self.batt_chart = DualAxisChart(
+            chart_f, title="VBAT 与 SOC 历史",
+            y1=("VBAT(mV)", 3300, 4200, "#f1c40f"),
+            y2=("SOC(%)", 0, 100, "#2ecc71"), width=1060, height=300)
+        self.batt_chart.pack(padx=4, pady=4)
+        ttk.Label(tab,
+                  text="算法：nPM1300 库仑计 SOC（nrf_fuel_gauge）——SOC 电流积分为主，"
+                       "电压经 OCV 曲线交叉校验；低电门限 15%（5% 滞回）",
+                  font=("微软雅黑", 8)).pack(anchor="w", padx=10, pady=2)
 
     def _tab_frames(self):
         tab = ttk.Frame(self.nb)
@@ -542,10 +834,13 @@ class PetRingConsole(tk.Tk):
 
     # ---------------- 底部日志 ----------------
     def _build_log(self):
+        sep = ttk.Frame(self)
+        sep.pack(side="bottom", fill="x", padx=10)
+        ttk.Separator(sep, orient="horizontal").pack(fill="x", pady=2)
         self.log_txt = tk.Text(self, height=4, bg="#14181d", fg="#7fb3d5",
                                font=("Consolas", 9))
         self.log_txt.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
-        self.log("DEMO 启动：数据为模拟生成，界面元素对应通信协议 V0.2。")
+        self.log("DEMO 启动：数据为模拟生成，界面元素对应通信协议 V0.4。")
 
     def log(self, msg):
         self.log_txt.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
@@ -728,6 +1023,18 @@ class PetRingConsole(tk.Tk):
         # 电池电量：未连接也持续模拟充放电；连接后 2s 一帧 BATTERY 上报
         mv, pct, chg = lk.battery_sample(0.1)
         self._draw_battery(mv, pct, chg)
+        # 电池页签：大字状态 + 历史曲线（0.5s 一点）
+        self.batt_big["soc"].configure(text=f"{pct} %")
+        self.batt_big["vbat"].configure(text=f"{mv} mV")
+        self.batt_big["state"].configure(
+            text="⚡ 充电中" if chg else "电池供电")
+        low = pct <= lk.BATT_LOW_PCT
+        self.batt_low_lamp.configure(fg="#e74c3c" if low else "#3a4148")
+        self._batt_chart_cnt = getattr(self, "_batt_chart_cnt", 0) + 1
+        if self._batt_chart_cnt >= 5:
+            self._batt_chart_cnt = 0
+            self.batt_chart.push(time.time(), mv, pct)
+            self.batt_chart.redraw()
         if lk.connected:
             self._batt_cnt = getattr(self, "_batt_cnt", 0) + 1
             if self._batt_cnt >= 20:
@@ -747,10 +1054,17 @@ class PetRingConsole(tk.Tk):
                     f = lk.imu_frame(pitch)
                     for lbl, val in zip(self.imu_vals[key], f):
                         lbl.configure(text=str(val))
-                    wa, wg = self.imu_waves[key]
-                    for w, v in zip((wa, wg), (f[0], f[3])):
-                        w.push(v)
-                        w.redraw()
+                    ui = self.imu_ui[key]
+                    if ui["mode"].get() == "overview":
+                        ui["wa"].push(f[0:3])
+                        ui["wa"].redraw()
+                        ui["wg"].push(f[3:6])
+                        ui["wg"].redraw()
+                    else:
+                        idx = ("ax", "ay", "az", "gx", "gy", "gz").index(
+                            ui["comp"].get())
+                        ui["ws"].push(f[idx])
+                        ui["ws"].redraw()
                     self._emit_frame(0x01 if key == "U4" else 0x02,
                                      struct.pack("<B6h", 1, *f))
             # QVAR
