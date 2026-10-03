@@ -3,7 +3,14 @@
 
 # 构建产物与日志
 build/
-build_log.txt
-push_log.txt
-build_log.txt
+build_ble_test/
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 上位机运行时产物
+host/downloads/
+imu_*.csv
 gui_log.txt

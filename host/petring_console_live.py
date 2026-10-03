@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-宠物环传感器控制  v1.06 正式版（真实 BLE 连接，tkinter）
+宠物环传感器控制  v1.07 正式版（真实 BLE 连接，tkinter）
+
+版本历史：
+  v1.06  首版正式版（真实 BLE，协议 V0.5）
+  v1.07  高帧率数据流下 UI 刷新节流（帧监视批量刷、波形标脏重绘、
+         状态灯/下载进度节流），修复界面卡死
 
 与 host/petring_console_demo.py（模拟数据 DEMO）共用同一套界面：
 继承 demo 的 PetRingConsole，仅把 SimLink 换成真实 BleWorker
@@ -26,6 +31,11 @@ from tkinter import ttk
 from bleak import BleakClient, BleakScanner
 
 from petring_console_demo import PetRingConsole, SimLink  # 复用界面与控件
+
+# ---------------------------------------------------------------- 版本信息
+APP_VERSION = "v1.07"           # 上位机版本
+APP_BUILD = "2026-10-03"        # 构建日期
+APP_PROTOCOL = "V0.5a"          # 适配的通信协议版本
 
 # ---------------------------------------------------------------- 协议常量
 # （与 tools/hub_protocol_test.py、固件 ble_sensor_hub.h 保持一致）
@@ -245,7 +255,8 @@ class PetRingLive(PetRingConsole):
 
     def __init__(self):
         super().__init__()
-        self.title("宠物环传感器控制  v1.06 正式版（真实 BLE）")
+        self.title(f"宠物环传感器控制  {APP_VERSION} 正式版"
+                   f"（真实 BLE · 协议 {APP_PROTOCOL}）")
         self.link = LiveLink()
         self.devices = {}                   # 显示名 -> (addr, rssi)
         self.xfer = {}                      # file_id -> {"buf":bytearray}
@@ -261,7 +272,8 @@ class PetRingLive(PetRingConsole):
         self._resync_static()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        self.log("正式版： bleak 真实连接。先“扫描”，选中设备后“连接”。")
+        self.log(f"正式版 {APP_VERSION}（构建 {APP_BUILD}，协议 {APP_PROTOCOL}）："
+                 f" bleak 真实连接。先“扫描”，选中设备后“连接”。")
 
     def _resync_static(self):
         """用 LiveLink 初始状态重刷一遍静态控件（构造期画的是 SimLink 默认值）。"""
