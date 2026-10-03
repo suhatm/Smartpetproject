@@ -5,8 +5,9 @@
 
 版本历史：
   v1.06  首版正式版（真实 BLE，协议 V0.5）
-  v1.07  高帧率数据流下 UI 刷新节流（帧监视批量刷、波形标脏重绘、
-         状态灯/下载进度节流），修复界面卡死
+  v1.07  高帧率数据流卡死修复：UI 刷新节流（帧监视批量刷、波形标脏重绘、
+         状态灯/下载进度节流）+ 波形画布增量重绘（静态框架一次绘制，
+         动态曲线 tag 局部刷新）
 
 与 host/petring_console_demo.py（模拟数据 DEMO）共用同一套界面：
 继承 demo 的 PetRingConsole，仅把 SimLink 换成真实 BleWorker
@@ -254,6 +255,12 @@ class PetRingLive(PetRingConsole):
     """继承 demo 全部界面，替换数据链路为真实 BLE。"""
 
     def __init__(self):
+        # 注意：demo 基类 __init__ 末尾会直接调 _tick() -> _flush_ui()，
+        # 这些缓冲必须在 super().__init__() 之前就存在，否则 tkinter
+        # 的属性回退（Widget.__getattr__ -> self.tk）会抛 AttributeError
+        self._rx_buf = []                   # 帧监视行缓存（_tick 批量刷）
+        self._rd_marks = []                 # 待重绘波形（_tick 批量刷）
+        self._rd_marked = set()
         super().__init__()
         self.title(f"宠物环传感器控制  {APP_VERSION} 正式版"
                    f"（真实 BLE · 协议 {APP_PROTOCOL}）")
@@ -263,9 +270,6 @@ class PetRingLive(PetRingConsole):
         self.xfer_target = None             # 正在下载的 file_id
         self.sd_testing = False
         self._rec_pending = False
-        self._rx_buf = []                   # 帧监视行缓存（_tick 批量刷）
-        self._rd_marks = []                 # 待重绘波形（_tick 批量刷）
-        self._rd_marked = set()
         self.worker = BleWorker(self)
         self.worker.start()
         self._rewire_demo_only()
@@ -926,6 +930,8 @@ class PetRingLive(PetRingConsole):
             self._rd_marks.append(w)
 
     def _flush_ui(self):
+        if getattr(self, "frame_txt", None) is None:
+            return                          # 基类 __init__ 尚未建好控件
         buf = self._rx_buf
         if buf:
             self._rx_buf = []

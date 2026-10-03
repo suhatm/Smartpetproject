@@ -156,6 +156,7 @@ class WaveCanvas(tk.Canvas):
         self.data = []
         self.thr_lines = []          # 阈值线 y 值列表
         self.title = title
+        self._frame_ok = False       # 静态框架是否已绘制
         self._draw_frame()
 
     def set_range(self, ymin, ymax):
@@ -202,19 +203,26 @@ class WaveCanvas(tk.Canvas):
             self.create_line(self.ML, y, self.ML + pw, y, fill="#232a31")
             self.create_text(self.ML - 4, y, anchor="e", fill="#7f8c8d",
                              font=("Consolas", 8), text=f"{v:g}")
+        self._frame_ok = True
 
     def redraw(self):
-        self._draw_frame()
+        # 增量重绘：标题/网格/刻度是静态框架只画一次（_draw_frame），
+        # 高频刷新只重建动态层（零线/阈值线/波形，tag="dyn"），
+        # 避免 delete("all") + 全量重建在 ~200 帧/s 数据流下吃满主线程
+        if not self._frame_ok:
+            self._draw_frame()
+        self.delete("dyn")
         pw = self._pw()
         # 零线（比网格略亮）
         if self.ymin < 0 < self.ymax:
             y0 = self._y_of(0)
-            self.create_line(self.ML, y0, self.ML + pw, y0, fill="#39434c")
+            self.create_line(self.ML, y0, self.ML + pw, y0,
+                             fill="#39434c", tags="dyn")
         # 阈值线
         for tv in self.thr_lines:
             y = self._y_of(tv)
             self.create_line(self.ML, y, self.ML + pw, y,
-                             fill="#c0392b", dash=(4, 3))
+                             fill="#c0392b", dash=(4, 3), tags="dyn")
         # 波形
         n = len(self.data)
         if n >= 2:
@@ -222,7 +230,7 @@ class WaveCanvas(tk.Canvas):
             x0 = self.ML + pw - n
             for i, v in enumerate(self.data):
                 pts += [x0 + i, self._y_of(v)]
-            self.create_line(*pts, fill=self.color, width=1.4)
+            self.create_line(*pts, fill=self.color, width=1.4, tags="dyn")
 
 # ---------------------------------------------------------------- 多序列波形
 
@@ -242,6 +250,7 @@ class MultiWaveCanvas(tk.Canvas):
         self.w, self.h = width, height
         self.title = title
         self.series = [(nm, c, []) for nm, c in series]
+        self._frame_ok = False       # 静态框架是否已绘制
         self._draw_frame()
 
     def set_range(self, ymin, ymax):
@@ -295,14 +304,20 @@ class MultiWaveCanvas(tk.Canvas):
             self.create_line(self.ML, y, self.ML + pw, y, fill="#232a31")
             self.create_text(self.ML - 4, y, anchor="e", fill="#7f8c8d",
                              font=("Consolas", 8), text=f"{v:g}")
+        self._frame_ok = True
 
     def redraw(self):
-        self._draw_frame()
+        # 增量重绘：静态框架（标题/图例/网格）只画一次，动态层（零线+曲线）
+        # 用 tag="dyn" 局部刷新（同 WaveCanvas，防高帧率数据流卡顿）
+        if not self._frame_ok:
+            self._draw_frame()
+        self.delete("dyn")
         pw = self._pw()
         # 零线（比网格略亮）
         if self.ymin < 0 < self.ymax:
             y0 = self._y_of(0)
-            self.create_line(self.ML, y0, self.ML + pw, y0, fill="#39434c")
+            self.create_line(self.ML, y0, self.ML + pw, y0,
+                             fill="#39434c", tags="dyn")
         for _, color, buf in self.series:
             n = len(buf)
             if n >= 2:
@@ -310,7 +325,7 @@ class MultiWaveCanvas(tk.Canvas):
                 x0 = self.ML + pw - n
                 for i, v in enumerate(buf):
                     pts += [x0 + i, self._y_of(v)]
-                self.create_line(*pts, fill=color, width=1.3)
+                self.create_line(*pts, fill=color, width=1.3, tags="dyn")
 
 # ---------------------------------------------------------------- 双 Y 轴时间图表
 
