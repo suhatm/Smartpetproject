@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-宠物环传感器控制  v1.07 正式版（真实 BLE 连接，tkinter）
+宠物环传感器控制  v1.08 正式版（真实 BLE 连接，tkinter）
 
 版本历史：
   v1.06  首版正式版（真实 BLE，协议 V0.5）
   v1.07  高帧率数据流卡死修复：UI 刷新节流（帧监视批量刷、波形标脏重绘、
          状态灯/下载进度节流）+ 波形画布增量重绘（静态框架一次绘制，
          动态曲线 tag 局部刷新）
+  v1.08  配合固件 task-V1.07：意外断线自动重连（10 次 × 3s，覆盖固件
+         WDT 复位窗口）；录音启动 6s 无 ACK 超时兜底（固件失败静默
+         曾致按钮永久禁用）；录音中显示双麦克风实时电平；断线时复位
+         SD 测试/下载挂起状态
 
 与 host/petring_console_demo.py（模拟数据 DEMO）共用同一套界面：
 继承 demo 的 PetRingConsole，仅把 SimLink 换成真实 BleWorker
@@ -34,9 +38,13 @@ from bleak import BleakClient, BleakScanner
 from petring_console_demo import PetRingConsole, SimLink  # 复用界面与控件
 
 # ---------------------------------------------------------------- 版本信息
-APP_VERSION = "v1.07"           # 上位机版本
+APP_VERSION = "v1.08"           # 上位机版本
 APP_BUILD = "2026-10-03"        # 构建日期
 APP_PROTOCOL = "V0.5a"          # 适配的通信协议版本
+
+RECONNECT_MAX = 10              # 意外断线自动重连次数上限
+RECONNECT_DELAY_MS = 3000       # 每次重连间隔（覆盖固件 WDT 复位窗口）
+REC_ACK_TIMEOUT = 6.0           # 录音启动 ACK 超时（s）
 
 # ---------------------------------------------------------------- 协议常量
 # （与 tools/hub_protocol_test.py、固件 ble_sensor_hub.h 保持一致）
@@ -129,6 +137,7 @@ class LiveLink(SimLink):
         self.pwr = {"SENS": False, "STORE": False, "ANALOG": False}
         self.has_batt = False
         self.last_batt = (0, 0, False)      # (mv, pct, charging)
+        self.last_mic = (0, 0)              # (rms_l, rms_r) 0x06 帧
 
     def battery_sample(self, dt_s):          # noqa: ARG002 - 兼容旧调用
         return self.last_batt
@@ -274,6 +283,12 @@ class PetRingLive(PetRingConsole):
         self.worker.start()
         self._rewire_demo_only()
         self._resync_static()
+        # ---- 自动重连 / 挂起状态 ----
+        self._reconnect_addr = None     # 意外断线后重连目标
+        self._reconnect_attempts = 0
+        self._user_disconnect = False   # 手动断开则不自动重连
+        self._closing = False
+        self._rec_pending_since = 0.0
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self.log(f"正式版 {APP_VERSION}（构建 {APP_BUILD}，协议 {APP_PROTOCOL}）："
@@ -333,6 +348,10 @@ class PetRingLive(PetRingConsole):
 
     # ---------------- 连接管理 ----------------
     def on_scan(self):
+        # 手动扫描 = 接管连接管理，取消进行中的自动重连
+        self._user_disconnect = True
+        self._reconnect_addr = None
+        self._reconnect_attempts = 0
         self.btn_scan.configure(state="disabled")
         self.log("扫描中（5s）……")
         self.worker.submit("scan")
@@ -364,6 +383,8 @@ class PetRingLive(PetRingConsole):
 
     def on_connect(self):
         if self.link.connected:
+            self._user_disconnect = True   # 手动断开，不触发自动重连
+            self._reconnect_addr = None
             self.btn_conn.configure(state="disabled")
             self.worker.submit("disconnect")
             return
@@ -371,22 +392,48 @@ class PetRingLive(PetRingConsole):
         if label not in self.devices:
             self.log("请先“扫描”选择设备。")
             return
+        self._user_disconnect = False
+        self._reconnect_addr = self.devices[label][0]
+        self._reconnect_attempts = 0
         self.btn_conn.configure(state="disabled")
-        self.worker.submit("connect", self.devices[label][0])
+        self.worker.submit("connect", self._reconnect_addr)
+
+    def _schedule_reconnect(self):
+        """意外断线后的自动重连：固定间隔重试，覆盖固件 WDT 复位窗口。"""
+        if self._closing or self._user_disconnect:
+            return
+        if self._reconnect_addr is None:
+            return
+        if self._reconnect_attempts >= RECONNECT_MAX:
+            self.log("自动重连失败：请确认设备在范围内后重新扫描连接。")
+            self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
+            return
+        self._reconnect_attempts += 1
+        self.lbl_conn.configure(
+            text=f"● 重连中（{self._reconnect_attempts}/{RECONNECT_MAX}）…",
+            fg="#f1c40f")
+        self.after(RECONNECT_DELAY_MS, lambda: self.worker.submit(
+            "connect", self._reconnect_addr))
 
     def _on_conn_state(self, state, mtu, info):
         self.btn_conn.configure(state="normal")
         if state == "connecting":
-            self.lbl_conn.configure(text="● 连接中…", fg="#f1c40f")
+            if self._reconnect_attempts == 0:
+                self.lbl_conn.configure(text="● 连接中…", fg="#f1c40f")
             return
         if state == "connected":
+            was_reconnect = self._reconnect_attempts > 0
             self.link.connected = True
+            self._reconnect_attempts = 0
+            self._user_disconnect = False
             self.btn_conn.configure(text="断开")
             self.lbl_mtu.configure(text=f"MTU: {mtu}")
             label = self.dev_var.get()
             rssi = self.devices.get(label, ("", 0))[1]
             self.lbl_rssi.configure(text=f"RSSI: {rssi} dBm")
-            self.lbl_conn.configure(text="● 已连接", fg="#2ecc71")
+            self.lbl_conn.configure(
+                text="● 已连接（自动重连成功）" if was_reconnect
+                     else "● 已连接", fg="#2ecc71")
             ver = info.decode("utf-8", "replace") if info else ""
             self.log(f"已连接，MTU={mtu}，已订阅 0x21/0x23。"
                      + (f"固件信息：{ver}" if ver else ""))
@@ -401,22 +448,44 @@ class PetRingLive(PetRingConsole):
         self.btn_conn.configure(text="连接")
         self.lbl_mtu.configure(text="MTU: —")
         self.lbl_rssi.configure(text="RSSI: —")
-        self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
         self.link.recording = False
+        self._rec_pending = False
+        self.xfer_target = None
+        # 挂起状态复位（断线时 SD 测试/下载不再等待）
+        if self.sd_testing:
+            self.sd_testing = False
+            self.sd_prog.stop()
+            self.sd_prog.configure(mode="determinate", value=0)
+            self.btn_sd_test.configure(state="normal")
+            self.lbl_sd_status.configure(text="连接断开，测试中止")
         self.btn_rec_start.configure(state="normal")
         self.btn_rec_stop.configure(state="disabled")
-        if state == "failed":
-            self.log("连接失败：" + info.decode("utf-8", "replace"))
-        elif state == "dropped":
-            self.log("连接意外断开（设备关机或超出范围）。")
+        if state == "dropped":
+            self.log("连接意外断开，尝试自动重连……")
             self.term_print("<< LINK DOWN")
-        elif was:
+            self.lbl_conn.configure(
+                text=f"● 重连中（0/{RECONNECT_MAX}）…", fg="#f1c40f")
+            self._schedule_reconnect()
+            return
+        if state == "failed":
+            if self._reconnect_attempts > 0:
+                # 自动重连途中的一次失败：继续下一轮
+                self._schedule_reconnect()
+                return
+            self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
+            self.log("连接失败：" + info.decode("utf-8", "replace"))
+            return
+        # 主动断开（disconnected）
+        self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
+        if was:
             self.log("已断开。LED override 归还电源 UI 状态机（协议 §7.4）。")
+
 
     def _on_worker_error(self, where, msg):
         self.log(f"BLE 错误（{where}）：{msg}")
 
     def _on_close(self):
+        self._closing = True
         self.worker.stop()
         self.after(300, self.destroy)
 
@@ -482,6 +551,7 @@ class PetRingLive(PetRingConsole):
                                                 lk.rec_duration)):
             return
         self._rec_pending = True
+        self._rec_pending_since = time.monotonic()
         self.btn_rec_start.configure(state="disabled")
 
     def on_rec_stop(self, auto=False):  # noqa: ARG002
@@ -729,7 +799,10 @@ class PetRingLive(PetRingConsole):
             self.link.mod_state["TEMP"] = st
             self._refresh_mod_lamps()
 
-    def _h_mic(self, payload):  # RMS 帧：帧监视可见，无专门控件
+    def _h_mic(self, payload):  # RMS 帧：状态(1)+左RMS(2)+右RMS(2)
+        if len(payload) >= 5:
+            _st, l, r = struct.unpack("<BHH", payload[:5])
+            self.link.last_mic = (l, r)
         if self.link.mod_state["MIC"] != 1:
             self.link.mod_state["MIC"] = 1
             self._refresh_mod_lamps()
@@ -979,9 +1052,18 @@ class PetRingLive(PetRingConsole):
             lk.rec_elapsed += 0.1
             pct = min(100, lk.rec_elapsed / lk.rec_duration * 100)
             self.rec_prog["value"] = pct
+            ml, mr = getattr(lk, "last_mic", (0, 0))
             self.lbl_rec.configure(
                 text=f"录音中 {lk.rec_elapsed:.1f}s / {lk.rec_duration}s"
-                     f"（录至 SD）")
+                     f"（录至 SD）  L:{ml:5d}  R:{mr:5d}")
+        # 录音启动 ACK 超时兜底（旧固件失败静默时会卡“等待启动”）
+        # 注：super().__init__ 期间就会跑 _tick，属性用 getattr 兜底
+        if getattr(self, "_rec_pending", False) and \
+                (time.monotonic() -
+                 getattr(self, "_rec_pending_since", 0.0)) > REC_ACK_TIMEOUT:
+            self._rec_pending = False
+            self.btn_rec_start.configure(state="normal")
+            self.log("录音启动超时：未收到 ACK（确认连接与 SD 状态后重试）。")
         self.after(100, self._tick)
 
 
