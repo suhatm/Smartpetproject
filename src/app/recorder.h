@@ -56,6 +56,9 @@ int recorder_stop(void);
 /** @brief 是否正在录音 */
 bool recorder_active(void);
 
+/** @brief 录音/监听/文件传输任一进行中（电源域断电互斥判断用） */
+bool recorder_busy(void);
+
 /** @brief 开始 MIC 电平监听（不录音，仅 0x06 RMS 帧；SENSOR_EN(MIC,1) 用） */
 int recorder_monitor_start(void);
 

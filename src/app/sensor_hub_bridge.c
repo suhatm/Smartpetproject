@@ -33,6 +33,7 @@
 #include "qvar_sensor.h"
 #include "recorder.h"
 #include "sd_store.h"
+#include "status_led.h"
 #include "temp_sensor.h"
 
 /* ---- 指令码（协议 §7.2） ---- */
@@ -73,7 +74,7 @@ enum {
 #define MOD_ST_ABSENT   2U
 #define MOD_ST_DEGRADED 3U
 
-#define FW_INFO_STRING "SmartPetRing v1.06;task-V1.06;hubV0.5"
+#define FW_INFO_STRING "SmartPetRing v1.07;task-V1.07;hubV0.5"
 
 #define FAST_PERIOD_MS  33U   /* ~30Hz：IMU/QVAR */
 #define SLOW_PERIOD_MS  1000U /* 1Hz：TEMP/STATUS；2s 分频：BATTERY */
@@ -530,11 +531,14 @@ static void module_status_tick(bool vbus_present)
 				  (ana ? 0x04U : 0U));
 	}
 
-	/* LED 实况（override 激活时报告 override 值） */
-	uint8_t mask;
+	/* LED 实况：上报实际生效状态（task-V1.07 起不再直接报 override
+	 * 请求值——故障/按键图案优先级更高、override 未必真正生效，
+	 * 上报真实值才能保证上位机 UI 与板上实灯一致） */
+	bool led_r;
+	bool led_b;
 
-	if (hub_led_override_get(&mask)) {
-		st[3] = mask & 0x03U;
+	if (status_led_get(&led_r, &led_b) == 0) {
+		st[3] = (uint8_t)((led_r ? 0x01U : 0U) | (led_b ? 0x02U : 0U));
 	}
 
 	/* 电量 */
@@ -662,12 +666,71 @@ static void handle_pwr_set(const uint8_t *p, uint8_t len, uint8_t req_seq)
 		return;
 	}
 
-	/* SENS 域关电前停 U4 流（域内传感器暂停，协议 §7.4） */
-	if (p[0] == POWER_DOMAIN_SENS && p[1] == 0U && u4_streaming) {
-		u4_stream_stop();
-		st_imu_u4 = MOD_ST_DEGRADED;
+	uint8_t dom = p[0];
+	bool on = p[1] != 0U;
+	int ret;
+
+	/* 录音/监听/传输进行中拒绝断相关域电：麦克风挂 SENS、WAV 文件挂
+	 * STORE（task-V1.07：曾可边录音边切电，卡掉电后 FATFS 状态脱钩，
+	 * 后续录音静默失败且上位机卡"等待启动"） */
+	if (!on && ((dom == POWER_DOMAIN_SENS) ||
+		    (dom == POWER_DOMAIN_STORE)) && recorder_busy()) {
+		send_ack(CMD_PWR_SET, req_seq, -11, NULL, 0);
+		return;
 	}
-	int ret = power_domain_set((enum power_domain)p[0], p[1] != 0U);
+
+	if (dom == POWER_DOMAIN_SENS) {
+		if (on) {
+			ret = power_domain_set(POWER_DOMAIN_SENS, true);
+			if (ret == 0) {
+				/* PWR_SET 是电源权威控制：关断期间域内传感器
+				 * 已 POR，须重建引用计数 + 重启数据流 + 重探测
+				 * 才能恢复（此前关->开后 IMU 永久哑火） */
+				sens_users = 0U;
+				if (cfg[SENSOR_IMU_U4].enabled &&
+				    (u4_stream_start() != 0)) {
+					st_imu_u4 = MOD_ST_DEGRADED;
+				}
+				if (cfg[SENSOR_IMU_U1].enabled ||
+				    cfg[SENSOR_QVAR].enabled ||
+				    cfg[SENSOR_TEMP].enabled) {
+					(void)sens_acquire();
+					(void)body_imu_reprobe();
+					(void)qvar_channel_reprobe(
+						QVAR_CHANNEL_A);
+					(void)qvar_channel_reprobe(
+						QVAR_CHANNEL_B);
+				}
+			}
+		} else {
+			/* 停 U4 流（释放其引用）后强制清零基线引用，
+			 * 确保域真正断电（协议 §7.4） */
+			if (u4_streaming) {
+				u4_stream_stop();
+				st_imu_u4 = MOD_ST_DEGRADED;
+			}
+			sens_users = 0U;
+			ret = power_domain_set(POWER_DOMAIN_SENS, false);
+		}
+	} else if (dom == POWER_DOMAIN_STORE) {
+		if (on) {
+			ret = power_domain_set(POWER_DOMAIN_STORE, true);
+		} else {
+			/* 先卸载 FATFS 再断电（sd_unmount 一并负责）：
+			 * 直接切电会让 mounted 标志与卡实际状态脱钩，
+			 * 之后 REC_* / SD_TEST 全部静默失败 */
+			sd_unmount();
+			ret = 0;
+		}
+	} else { /* POWER_DOMAIN_ANALOG */
+		ret = power_domain_set(POWER_DOMAIN_ANALOG, on);
+		if (ret == 0) {
+			/* 同步桥接状态：否则 SENSOR_EN(PVDF) 的 !analog_on
+			 * 判断失真；断电期间 PVDF 读数为垃圾，停帧 */
+			analog_on = on;
+			cfg[SENSOR_PVDF].enabled = on;
+		}
+	}
 
 	send_ack(CMD_PWR_SET, req_seq, (int8_t)(ret == 0 ? 0 : -5), NULL, 0);
 }

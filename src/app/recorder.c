@@ -129,6 +129,16 @@ static int sens_ensure(void)
 	if (sens_powered) {
 		return 0;
 	}
+	/* SENS 是共享电源轨（bridge 的 IMU/QVAR/U1 基线同样挂在上面）：
+	 * 已导通时绝不"认领"，否则录音结束的 sens_release 会把
+	 * 别人正在使用的轨拉闸（task-V1.07：曾致录完音 IMU 全灭） */
+	uint8_t ldsw;
+	bool ana;
+
+	if ((power_control_get_state(&ldsw, &ana) == 0) &&
+	    ((ldsw & 0x01U) != 0U)) {
+		return 0;
+	}
 	int ret = power_domain_set(POWER_DOMAIN_SENS, true);
 
 	if (ret == 0) {
@@ -300,6 +310,8 @@ static void record_run(uint8_t ch_mask, uint16_t duration_s)
 	uint8_t num_ch = (ch_mask == 0x03U) ? 2U : 1U;
 	struct fs_file_t wav;
 	bool to_file = (duration_s != 0xFFFFU); /* monitor 用 0xFFFF 哨兵 */
+	bool started = false;                   /* 已发 REC_STATE(1) */
+	bool file_opened = false;               /* WAV 文件已打开 */
 	uint32_t data_bytes = 0U;
 	struct rms_acc acc = { 0 };
 	uint32_t bytes_per_ms = PCM_RATE / 1000U * num_ch * (PCM_WIDTH / 8U);
@@ -335,6 +347,7 @@ static void record_run(uint8_t ch_mask, uint16_t duration_s)
 			printk("REC,fail,open_rc=%d\n", ret);
 			goto out_sens;
 		}
+		file_opened = true;
 		wav_header_fill(&hdr, num_ch, 0U);
 		(void)fs_write(&wav, &hdr, sizeof(hdr));
 	}
@@ -354,6 +367,7 @@ static void record_run(uint8_t ch_mask, uint16_t duration_s)
 	monitoring = !to_file;
 	rec_started_ms = k_uptime_get();
 	stop_req = false;
+	started = true;
 	if (to_file) {
 		send_rec_state(1U, cur_file_id, 0U);
 	}
@@ -415,13 +429,20 @@ out_file:
 		uint16_t elapsed_s = (uint16_t)((k_uptime_get() -
 						 rec_started_ms) / 1000);
 
-		send_rec_state(2U, cur_file_id, elapsed_s);
-		printk("REC,done,file=%u,bytes=%u,elapsed=%us\n",
-		       cur_file_id, data_bytes, elapsed_s);
+		/* 真正录过才发"完成(2)"；dmic 配置/启动失败发"停止(0)"，
+		 * 上位机据此复位按钮（此前失败静默，GUI 卡"等待启动"） */
+		send_rec_state(started ? 2U : 0U, cur_file_id, elapsed_s);
+		printk("REC,%s,file=%u,bytes=%u,elapsed=%us\n",
+		       started ? "done" : "fail", cur_file_id, data_bytes,
+		       elapsed_s);
 	}
 out_sens:
 	sens_release();
 out:
+	/* 文件都没开成的失败（无卡/开文件失败/dmic 不就绪）：补发停止事件 */
+	if (to_file && !file_opened) {
+		send_rec_state(0U, cur_file_id, 0U);
+	}
 	recording = false;
 	monitoring = false;
 }
@@ -653,6 +674,11 @@ bool recorder_active(void)
 	return recording;
 }
 
+bool recorder_busy(void)
+{
+	return recording || monitoring || xfering;
+}
+
 int recorder_monitor_start(void)
 {
 	if (recording || monitoring || xfering) {
@@ -798,6 +824,7 @@ int recorder_start(uint8_t ch_mask, uint16_t duration_s)
 }
 int recorder_stop(void) { return -1; }
 bool recorder_active(void) { return false; }
+bool recorder_busy(void) { return false; }
 int recorder_monitor_start(void) { return -12; }
 int recorder_monitor_stop(void) { return -1; }
 int recorder_list(uint8_t *buf, uint16_t max_len, uint16_t *out_len)

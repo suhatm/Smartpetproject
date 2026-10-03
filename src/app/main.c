@@ -389,8 +389,12 @@ static void handle_events(int64_t now_ms)
  *  - FAULT：每 2s 周期闪三次 120ms 红灯（错误图案）；
  *  - 按键按住 >=3s：红蓝同亮，提示"松手即关机"；
  *  - 按键按住 1~3s：红灯常亮，提示关机武装中；
- *  - CHARGE_ONLY：红灯 1s 周期闪烁（表示 USB 供电，非充电电流证明）；
- *  - ACTIVE：心跳指示——每 APP_HEARTBEAT_PERIOD_MS 双灯同亮
+ *  - BLE LED_SET override（方案 §3.3 仲裁第 4 级，task-V1.07 调整）：
+ *    ACTIVE 与 CHARGE_ONLY 均可见（否则插 USB 联调时上位机开灯无反应，
+ *    实测被当作"灯控制坏了"），优先级仍低于故障/按键图案；
+ *    断开连接后 override 自动清除回落原逻辑；
+ *  - CHARGE_ONLY（无 override）：红灯 1s 周期闪烁（表示 USB 供电）；
+ *  - ACTIVE（无 override）：心跳指示——每 APP_HEARTBEAT_PERIOD_MS 双灯同亮
  *    APP_HEARTBEAT_FLASH_MS（默认 5s/100ms，可关，见《可配置项.txt》）。
  *
  * @return 0 成功；负值 LED 驱动失败
@@ -417,6 +421,15 @@ static int update_led_pattern(int64_t now_ms)
 			red = true;
 		}
 	} else if (app_state == APP_STATE_CHARGE_ONLY) {
+		/* BLE override 在充电模式同样生效（task-V1.07：插 USB 联调时
+		 * 上位机 LED_SET 曾被充电闪烁吞掉，用户视角"灯控制坏了"） */
+		uint8_t ble_mask;
+
+		if (hub_led_override_get(&ble_mask)) {
+			return status_led_set(
+				(ble_mask & 0x01U) != 0U,
+				(ble_mask & 0x02U) != 0U);
+		}
 		/* 注意：只表示 USB/仅充电模式，不代表实际充电电流 */
 		red = ((uint32_t)now_ms % 1000U) < 500U;
 	} else {
