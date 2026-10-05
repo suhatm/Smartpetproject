@@ -51,6 +51,8 @@ APP_PROTOCOL = "V0.5a"          # 适配的通信协议版本
 RECONNECT_MAX = 10              # 意外断线自动重连次数上限
 RECONNECT_DELAY_MS = 3000       # 重连基础间隔（覆盖固件 WDT 复位窗口）
 RECONNECT_DELAY_MAX_MS = 15000  # 重连间隔上限（线性退避：3/6/9/12/15s）
+AWAIT_RECOVERY_MAX = 30         # 守候恢复扫描轮数上限（每轮 AWAIT_RECOVERY_MS）
+AWAIT_RECOVERY_MS = 20000       # 守候恢复扫描间隔（覆盖设备非正常关机后的恢复窗口）
 REC_ACK_TIMEOUT = 6.0           # 录音启动 ACK 超时（s）
 CTRL_ACK_TIMEOUT = 3.0          # LED/电源指令 ACK 超时（s）
 STATUS_POLL_MS = 10000          # 连接期周期 GET_STATUS 校准间隔（ms）
@@ -333,6 +335,8 @@ class PetRingLive(PetRingConsole):
         self._rec_pending_since = 0.0
         self._ctrl_pending = {}         # cmd -> 确认截止时刻（LED/PWR）
         self._status_poll_cnt = 0       # 周期 GET_STATUS 计数（_tick 驱动）
+        self._await_recovery = False    # 守候恢复模式（重连耗尽后自动扫描）
+        self._await_recovery_round = 0
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self.log(f"正式版 {APP_VERSION}（构建 {APP_BUILD}，协议 {APP_PROTOCOL}）："
@@ -392,10 +396,11 @@ class PetRingLive(PetRingConsole):
 
     # ---------------- 连接管理 ----------------
     def on_scan(self):
-        # 手动扫描 = 接管连接管理，取消进行中的自动重连
+        # 手动扫描 = 接管连接管理，取消进行中的自动重连/守候恢复
         self._user_disconnect = True
         self._reconnect_addr = None
         self._reconnect_attempts = 0
+        self._cancel_await_recovery()
         self.btn_scan.configure(state="disabled")
         self.log("扫描中（5s）……")
         self.worker.submit("scan")
@@ -427,8 +432,22 @@ class PetRingLive(PetRingConsole):
                      "①设备是否被他机占用（连接态不广播）；②设备指示灯"
                      "是否在闪；③关闭再开启电脑蓝牙后重扫（WinRT 扫描"
                      "会话偶发静默失败）。")
+        # 守候恢复轮的扫描结果：发现目标设备广播 → 自动重连
+        if getattr(self, "_await_recovery", False) and not err:
+            hit = next(((n, a, r) for n, a, r in found
+                        if a == self._reconnect_addr), None)
+            if hit is not None:
+                name, addr, rssi = hit
+                self._await_recovery = False
+                self._reconnect_attempts = 0
+                self.log(f"守候恢复：发现设备 {name}（RSSI={rssi}dBm），"
+                         "自动重连中……")
+                self.worker.submit("connect", self._reconnect_addr)
+            else:
+                self.after(AWAIT_RECOVERY_MS, self._recovery_scan)
 
     def on_connect(self):
+        self._cancel_await_recovery()     # 手动操作接管连接管理
         if self.link.connected:
             self._user_disconnect = True   # 手动断开，不触发自动重连
             self._reconnect_addr = None
@@ -454,10 +473,19 @@ class PetRingLive(PetRingConsole):
         if self._reconnect_addr is None:
             return
         if self._reconnect_attempts >= RECONNECT_MAX:
-            self.log("自动重连失败：请确认设备在范围内后重新扫描连接。"
-                     "若仍失败，可尝试关闭再开启电脑蓝牙（清除 WinRT "
-                     "残留会话）或复位设备。")
-            self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
+            # 重连耗尽 → 守候恢复模式：设备可能非正常关机/看门狗
+            # 复位/硬件故障后正在恢复（恢复窗口可达数分钟，远超重连
+            # 退避总时长）。周期扫描等待设备重新广播，发现即自动连接。
+            self._await_recovery = True
+            self._await_recovery_round = 0
+            self.log(f"自动重连 {RECONNECT_MAX} 次未成功——进入守候恢复："
+                     f"每 {AWAIT_RECOVERY_MS // 1000}s 自动扫描一次，发现"
+                     f"设备广播即自动连接（最多守候 "
+                     f"{AWAIT_RECOVERY_MAX * AWAIT_RECOVERY_MS // 60000} 分钟）。"
+                     "期间可随时手动扫描/连接/断开。")
+            self.lbl_conn.configure(text="● 等待设备恢复中…",
+                                    fg="#f1c40f")
+            self.after(2000, self._recovery_scan)
             return
         self._reconnect_attempts += 1
         delay = min(RECONNECT_DELAY_MS * self._reconnect_attempts,
@@ -467,6 +495,29 @@ class PetRingLive(PetRingConsole):
             fg="#f1c40f")
         self.after(delay, lambda: self.worker.submit(
             "connect", self._reconnect_addr))
+
+    def _recovery_scan(self):
+        """守候恢复：周期扫描目标地址，发现广播即自动重连。"""
+        if self._closing or self._user_disconnect or \
+                not getattr(self, "_await_recovery", False):
+            return
+        if self._await_recovery_round >= AWAIT_RECOVERY_MAX:
+            self._await_recovery = False
+            self.log("守候恢复结束：设备仍未出现。请确认设备已上电/在"
+                     "范围内，或手动复位设备后点「扫描」重连。")
+            self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
+            return
+        self._await_recovery_round += 1
+        self.lbl_conn.configure(
+            text=f"● 等待设备恢复（{self._await_recovery_round}/"
+                 f"{AWAIT_RECOVERY_MAX}）…", fg="#f1c40f")
+        self.worker.submit("scan")
+
+    def _cancel_await_recovery(self):
+        """用户手动操作（连接/断开/扫描）或成功连接时取消守候。"""
+        if getattr(self, "_await_recovery", False):
+            self._await_recovery = False
+            self.log("守候恢复已取消。")
 
     def _on_conn_state(self, state, mtu, info):
         self.btn_conn.configure(state="normal")
@@ -479,6 +530,7 @@ class PetRingLive(PetRingConsole):
             self.link.connected = True
             self._reconnect_attempts = 0
             self._user_disconnect = False
+            self._await_recovery = False   # 已连上（含守候恢复成功）
             self.btn_conn.configure(text="断开")
             self.lbl_mtu.configure(text=f"MTU: {mtu}")
             label = self.dev_var.get()
