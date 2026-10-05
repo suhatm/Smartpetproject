@@ -101,6 +101,22 @@ int status_led_set(bool red, bool blue)
 }
 
 /**
+ * @brief 读取当前实际生效的 LED 状态（缓存值）
+ *
+ * @return 0 成功；-ENODEV 未初始化（缓存无效）
+ */
+int status_led_get(bool *red, bool *blue)
+{
+	if ((pmic_dev == NULL) || !state_valid || (red == NULL) ||
+	    (blue == NULL)) {
+		return -ENODEV;
+	}
+	*red = red_state;
+	*blue = blue_state;
+	return 0;
+}
+
+/**
  * @brief 阻塞式脉冲：点亮 on_ms，再熄灭，可选再等待 off_ms
  *
  * @return 0 成功；负值 LED 设置失败

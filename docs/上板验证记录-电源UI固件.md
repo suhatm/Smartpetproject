@@ -84,3 +84,57 @@ nrfutil device reset
 - [ ] 充电中（VBUS 在位）长按关机：应挂起关机（`ship_deferred=1`），拔线后真正进 Ship；
 - [ ] 充电监护模式 LED 指示（红 1s 周期闪）。
 
+## 6. 心跳指示固件验证（2026-09-30，commit 4395986）
+
+- 新增 `CONFIG_APP_HEARTBEAT_LED`（默认开）：ACTIVE 期间每 5s 双灯同亮 100ms；
+  配套 `可配置项.txt` 汇总全部 7 个可配置项。
+- 烧录 + RTT 验证通过：`LED_PATTERN,heartbeat=both_flash_100ms_every_5000ms`、
+  SELFTEST PASS、无 FAULT、主循环静默运行。
+- 构建注意：本 SDK 复用 build 目录增量编译会触发 nrf_security 模块 Kconfig
+  malformed 报错（CONFIG_MBEDTLS_CONFIG_FILE 空 cache 变量被回喂 Kconfig），
+  需 `west build --pristine` 全量重建。
+
+## 7. 纯电池独立运行排查（2026-09-30 下午，结案：板子正常）
+
+用户报告"拔掉 J-Link 板子就死、无心跳"，经系统性排除法诊断：
+
+| 实验 | 结果 | 排除的假设 |
+|---|---|---|
+| 拔电池（J-Link 在） | SWD 立即失联 | VTREF 倒灌供电（SoC 电确实来自电池） |
+| 查网表 + Nordic 官方资料 | NRESET 内置 13kΩ 永久上拉 | 复位脚悬空导致假死 |
+| 电池重插（不按键） | SWD 立即可连 + 完整 boot 日志 | **冷启动默认 Ship 假设——实为自动开机（Active）** |
+| 逐根拔 SWD 线（单变量） | 每根拔掉都不死 | 探针驱动 nRESET/供电假设 |
+| 4 根全拔盯 20s | **心跳持续在闪** | 全部剩余假设——板子纯电池独立运行正常 |
+
+**结案结论**：板子纯电池独立运行完全正常。此前"无反应"为误判，原因组合：
+1. 板子处于 Ship 态时短按无反应（设计行为），需长按 ≥0.6s（OTP 默认更长，建议 2~3s）唤醒；
+2. 心跳灯效 100ms/5s 较短促，肉眼易漏看；
+3. 插拔电池后 PMIC 冷启动会**自动开机**，无需按键。
+
+**产品注意（待决策）**：nPM1300 OTP 冷启动默认 Active——意味着产品出厂/运输前必须
+手动进 Ship（或改 nPM PowerUP OTP 配置默认 Ship），否则插上电池即开机耗电。
+
+已知硬件事实补充：LED2（蓝）实板验证可正常点亮（关机蓝闪、短按确认均可见），
+原理图网表层面的"极性接反"判断对实物不成立（符号库 pin 定义差异所致）。
+
+## 8. 三电源域 SWD 邮箱测试（2026-09-30，task-V1.01，commit 14d5d8e）
+
+通信方案：uart20 禁用（引脚冲突）、无 USB CDC → 采用 **SWD 共享内存邮箱**：
+固件轮询 RAM 固定地址的 `power_test_mb` 结构（.noinit 段，map 符号解析地址），
+Python 上位机 `tools/power_domain_test.py` 经 nrfutil device read/write 读写邮箱。
+
+命令集：`on/off sens|store|ana|all`（单域独立/全开/全关）、`status`（查询）、
+`cycle`（自动化独立性测试）。Kconfig：`APP_POWER_DOMAIN_TEST_MB`（默认开，
+量产须关）。
+
+自动化测试结果（16/16 PASS）：
+- 全关基准 → 逐域单独开/关（SENS/STORE/ANALOG 互不影响）
+- 全开 → 全开中逐域单独关 → 恢复 → 全关收尾
+- 回读校验：LDSW1/LDSW2 状态位 + ANA_EN GPIO 电平，rc 全 OK
+
+调试中修复：邮箱命令执行后需 20ms settle 再回读 LDSW 状态位
+（软启动时延，首轮测试 SENS/STORE 显示 off 的根因）；
+上位机 nrfutil 读写增加 3 次自动重试（偶发 worker 超时）。
+
+资源占用：FLASH 2.52% / RAM 4.80%（含测试邮箱）。
+

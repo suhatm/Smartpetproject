@@ -44,5 +44,187 @@ config APP_LED_INDICATION_MS
 	help
 	  开机/关机/就绪指示图案的持续时长（默认 3 秒）。
 
+config APP_HEARTBEAT_LED
+	bool "Heartbeat LED indication during normal operation"
+	default y
+	help
+	  正常工作（ACTIVE）期间的心跳指示：LED0+LED1 同时快闪一下，
+	  周期与时长可配（APP_HEARTBEAT_PERIOD_MS / APP_HEARTBEAT_FLASH_MS）。
+	  用于"设备正在工作"的持续可见指示；关闭后正常工作期间灯全灭
+	  （最省电）。注意：心跳指示与省电存在权衡，默认开启满足
+	  "正常工作可见"的产品需求，量产可按需关闭。
+
+config APP_HEARTBEAT_PERIOD_MS
+	int "Heartbeat period (ms)"
+	default 5000
+	range 1000 60000
+	depends on APP_HEARTBEAT_LED
+	help
+	  心跳指示的重复周期（默认每 5 秒闪一次）。
+
+config APP_HEARTBEAT_FLASH_MS
+	int "Heartbeat flash duration (ms)"
+	default 100
+	range 20 500
+	depends on APP_HEARTBEAT_LED
+	help
+	  心跳单次闪烁的点亮时长（默认 100 ms，双灯同亮）。
+
+config APP_IMU_TEST
+	bool "IMU (U4 LSM6DSV16X) I2C bring-up self-test"
+	default y
+	help
+	  IMU 连通性自检（task-V1.03，docs/IMU采集测试方案.md）：
+	  NFC pad 归还（P1.02/P1.03 -> GPIO，NFCT.PADCONFIG 运行时写 0）、
+	  VDD_SENS_3V0 上电、SENS_I2C（i2c21）总线扫描、
+	  U4 WHO_AM_I 校验（0x0F，期望 0x70，两个候选地址 0x6A/0x6B）。
+	  自检完成后 SENS 电源域下电，结果经 RTT 打印 IMU_TEST,summary。
+	  量产固件可关闭以缩短开机时间。
+
+config APP_BLE_IDLE_TIMEOUT_SEC
+	int "BLE zombie-connection idle timeout (seconds, 0 = disabled)"
+	depends on APP_SENSOR_HUB
+	default 120
+	range 0 3600
+	help
+	  僵尸连接看门狗（未订阅分支）：连接后若【未订阅 Notify】且
+	  持续该时长没有任何读/写/订阅操作，固件主动断开并重新广播。
+
+	  背景：BLE 链路层监督超时（prj.conf 当前 0.42s）只能救"手机走远/
+	  关蓝牙"；若手机 App 被直接杀死而系统蓝牙仍开着、且设备在通信
+	  范围内，链路层 PDUs 一直正常交换，监督超时永不触发——板子停在
+	  "已连接"状态不再广播，任何新设备都搜不到（2026-10-01 手机与
+	  电脑端均实测复现，只能重新上电/复位恢复）。
+
+	  判定刻意保守：订阅中的活跃连接永不断开；任何一次读特征值、
+	  写控制点、订阅/取消订阅都会刷新活动时间戳。置 0 禁用。
+
+config APP_BLE_SUBSCRIBED_IDLE_TIMEOUT_SEC
+	int "BLE zombie-connection idle timeout while subscribed (seconds, 0 = disabled)"
+	depends on APP_SENSOR_HUB
+	default 300
+	range 0 3600
+	help
+	  僵尸连接看门狗（已订阅分支，2026-10-05 新增）：已订阅 Notify
+	  的连接，若持续该时长没有任何 ATT 层交互（读 0x24 / 写 0x22 /
+	  CCC 变更），固件主动断开并重新广播。
+
+	  背景：上位机应用异常退出（进程被杀/崩溃）但系统蓝牙栈仍维持
+	  链路层心跳时，旧看门狗的「订阅中不断开」策略让僵尸会话永存
+	  （2026-10-05 RTT 实锤：设备停在已连接态不广播，任何主机连
+	  不上）。链路层无法区分「应用活着在收」与「应用死了只剩 LL
+	  ACK」，ATT 交互静默是唯一可靠判据。协议 V0.5c 起要求上位机
+	  连接期间周期发送 GET_STATUS（建议 ≤10s），正常上位机永不触
+	  发本超时。置 0 禁用（退回旧「订阅中不断开」行为）。
+
+config APP_HW_WATCHDOG
+	bool "Hardware watchdog (wdt31) as last-resort hang recovery"
+	default y
+	help
+	  硬件看门狗兜底（详见 src/hardware/app_watchdog.h 注释）：
+	  2026-10-01 SWD 实锤，手机断开连接瞬间 Nordic MPSL 私有工作
+	  队列线程（协作优先级 -10）在闭源库内部死锁，饿死 sysworkq
+	  （广播重启 work 永不执行）与 main 线程——板子"不广播、无
+	  日志"假死，只能重新上电。应用层看门狗对高优先级线程挂死
+	  无能为力，唯一可靠兜底是硬件复位。main 主循环（20ms）喂狗，
+	  调试器 halt 时自动暂停计数（WDT_OPT_PAUSE_HALTED_BY_DBG）。
+
+config APP_WATCHDOG_TIMEOUT_SEC
+	int "Hardware watchdog timeout (seconds)"
+	depends on APP_HW_WATCHDOG
+	default 30
+	range 5 600
+	help
+	  看门狗超时：挂死后最长的假死时间（复位 + 重启约 1~2s）。
+	  30s 对宠物环够用；若调试期嫌复位烦可调大或临时关掉
+	  APP_HW_WATCHDOG。
+
+config APP_TEMP_TEST
+	bool "TMP112 temperature bring-up self-test"
+	default y
+	help
+	  task-V1.04：柔性板 U2 TMP112A（SENS_I2C @0x48）读温自检。
+	  FPC 未插时报告 ABSENT 不算失败。
+
+config APP_SD_TEST
+	bool "SD NAND (CSNP1GCR01) bring-up self-test"
+	default y
+	help
+	  task-V1.04：U12 SD NAND（spi00 + SD 2.0 SPI 模式）自检：
+	  disk 初始化 → 容量 → FATFS 挂载（失败则格式化）→ 文件读写比对。
+	  注意：卡上无文件系统时会被格式化（清卡）。
+
+config APP_MIC_TEST
+	bool "Dual IM69D128 PDM mic bring-up self-test"
+	default y
+	help
+	  task-V1.04：U5/U6 PDM 双麦（pdm20，CLK=P1.12/DIN=P1.10，
+	  立体声分时隙）采集 2s 并计算左右声道 RMS/峰值。
+
+config APP_BODY_IMU_TEST
+	bool "Flex-board U1 LSM6DSV16X (body IMU) bring-up self-test"
+	default y
+	help
+	  task-V1.05：柔性板 U1 LSM6DSV16XTR（SENS_I2C @0x6A，经 FPC1）
+	  六轴驱动与连接状态机。FPC 未插时报告 ABSENT 不算失败；
+	  运行期排线松脱自动转 DEGRADED，reprobe 可恢复。
+
+config APP_QVAR_TEST
+	bool "QVAR-A/B channel bring-up self-test"
+	default y
+	help
+	  task-V1.05：QVAR 人体准静态感应两差分通道（四电极输入）：
+	  QVAR-A=柔性板 U1（AQVAR1/AQVAR2），QVAR-B=主板 U4（BQVAR1/BQVAR2）。
+	  CTRL7 ah_qvar_en 配置遵循数据手册"XL/G 先 power-down"时序，
+	  通道所在 IMU 不在位时该通道 ABSENT，不影响另一通道。
+
+config APP_PVDF_TEST
+	bool "PVDF piezo signal chain (SAADC) bring-up self-test"
+	default y
+	depends on ADC
+	help
+	  task-V1.05：PVDF 压电膜信号链（U8 OPA4391 → SAADC 三路：
+	  ADC_HEART/AIN1、ADC_RAW/AIN6、ADC_REF/AIN7）。
+	  ANALOG 域（ANA_EN=P1.06）上电后自检 VBIAS 窗口
+	  （1200~1800mV）。PVDF 膜未接（H2 悬空）不构成软件可检测
+	  的故障，由上层按信号幅度判活。
+
 # 应用自定义 Kconfig 作为根文件时，必须引入 Zephyr 完整符号定义
 source "Kconfig.zephyr"
+
+config APP_SENSOR_HUB
+	bool "BLE Sensor Hub unified GATT service (task-V1.06)"
+	depends on BT
+	default y
+	help
+	  统一 Sensor Hub 服务（协议 V0.5）：e5a00020 服务，
+	  0x21 数据流 Notify / 0x22 指令 Write / 0x23 应答事件 Notify /
+	  0x24 信息 Read。task-V1.06 起为 BLE 唯一控制与数据入口，
+	  替代已删除的 LED 服务（e5a00001）与 IMU 流服务（e5a00010）。
+	  量产固件应置 n（省电 + 明文无安全）。
+
+config APP_SENSOR_HUB_AUTOSTART
+	bool "Auto-start sensor streams on boot"
+	depends on APP_SENSOR_HUB
+	default y
+	help
+	  上电即自动开始 U4 IMU 流与 PVDF/QVAR/U1 采集（SENSOR_EN 可关）。
+	  与 task-V1.03 自动开流同理：手机 App 只需订阅通知即可见数据，
+	  避免"先订阅还是先写控制点"的顺序踩坑。
+
+config APP_RECORDER
+	bool "Audio recorder (PDM -> SD WAV) and file management"
+	depends on APP_SENSOR_HUB
+	default y
+	help
+	  录音模块：REC_CTRL/REC_LIST/REC_READ/REC_DELETE 指令实现，
+	  16kHz/16bit WAV 落盘 SD，录音/监听期间上报 0x06 RMS 帧，
+	  REC_READ 支持 offset 断点续传（协议 V0.5 决策）。
+
+config APP_BATT_GAUGE
+	bool "Battery fuel gauge (nPM1300 coulomb counter SOC)"
+	default y
+	help
+	  电量计：NCS nrf_fuel_gauge 库 + 电池模型（battery_model.inc，
+	  未标定沿用样例模型），0x08 BATTERY 帧数据源；
+	  初始化失败降级电压线性映射（3300~4200mV）兜底。
