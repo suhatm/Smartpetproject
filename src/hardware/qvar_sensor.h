@@ -94,6 +94,22 @@ int qvar_bringup_test(void);
 int qvar_channel_enable(enum qvar_channel ch, enum qvar_zin zin);
 
 /**
+ * @brief 强制全序列重配指定通道（task-V1.10 僵尸 ACTIVE 修复）
+ *
+ * 与 qvar_channel_reprobe() 的区别：不检查软件状态、不短路，无条件
+ * 重跑 qvar_channel_enable() 完整序列。用于芯片寄存器被外部复位但
+ * 软件状态仍为 ACTIVE 的场景：
+ *   - U4/U1 驱动 device_init() 的 lsm6dsv16x_sw_por() 会把 CTRL7
+ *     .ah_qvar_en 清零（U4 deferred-init 首次发生在 imu_stream_start，
+ *     晚于开机 QVAR 自检——静电 B 恒灰的根因）；
+ *   - SENS 域断电重上电（POR）。
+ *
+ * @param ch 通道
+ * @return 0 成功；-ENODEV 所在 IMU 不在位；其他负值 IO 失败
+ */
+int qvar_channel_reconfigure(enum qvar_channel ch);
+
+/**
  * @brief 读取一帧双通道 QVAR 数据
  *
  * ABSENT 通道不发 I2C，a_valid/b_valid 标记各自可用性。

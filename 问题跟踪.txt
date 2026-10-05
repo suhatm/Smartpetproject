@@ -146,4 +146,40 @@
 附带发现：清 acID 复位后新日志起点并非缓冲 0 偏移（残留前段旧字节，
       读日志时以最后一处 "*** Booting" 为界解析即可，不影响使用）。
 
-【问题 #009】（预留编号）
+【问题 #009】静电 B（QVAR-B/U4）恒灰无反应：U4 驱动 device_init 的 sw_por 清掉 CTRL7
+--------------------------------------------------------------------------------
+状态：已修复（task-V1.10，待上板复验）
+发现日期：2026-10-05（上位机截图：静电 A 绿、静电 B 灰且值恒"—"，REPROBE 无效）
+现象：
+  - 开机后上位机"静电 B (U4)"灯恒灰、数值"—"，QVAR-B 波形无输出；
+  - 静电 A（U1）正常；主板 U4 六轴照常出数；
+  - 按"重新探测外设"(CMD 0x06 QVAR) 也无法恢复。
+根因（启动时序竞态，静态代码实锤）：
+  1. 开机 4.10 qvar_bringup_test 裸 I2C 置 U1/U4 CTRL7.ah_qvar_en=1，
+     双通道 ACTIVE（此时 B 自检还能过）；
+  2. 上位机连接后 imu_stream_start() 对 U4 做首次 device_init()
+     （overlay deferred-init），NCS v3.4.0 驱动 init_chip() 在 I2C
+     分支必走 lsm6dsv16x_sw_por()（lsm6dsv16x.c:1363）→ U4 全部
+     寄存器复位，CTRL7.ah_qvar_en 被抹掉，驱动只重配 XL/G；
+  3. 从此 U4 STATUS.ah_qvarda 永不置位 → qvar_read_one(B) 每帧
+     -EAGAIN（不计 io_fail）→ 通道卡"僵尸 ACTIVE"（状态仍 ACTIVE、
+     帧级 st=PRESENT），0x03 帧 b_valid 恒 0；
+  4. U1 无此问题：body_imu（4.9）的 device_init 早于 QVAR 使能（4.10）；
+  5. qvar_channel_reprobe() 对 state==ACTIVE 盲目短路返回 0，REPROBE
+     空转；QVAR_CFG(0x05) 能强重配但上位机无入口。
+  同病根场景：PWR_SET SENS 关→开后 sensor_hub_bridge 的恢复路径调
+  qvar_channel_reprobe(A/B) 同样被 ACTIVE 短路，A/B 双双僵尸。
+修复（task-V1.10）：
+  - qvar_sensor 新增 qvar_channel_reconfigure()：无条件全序列重配；
+  - imu_stream.c device_init(U4) 成功后立即 reconfigure(QVAR-B)；
+  - body_imu.c device_init(U1) 成功后 reconfigure(QVAR-A)（兜底）；
+  - qvar_read_one 连续 EAGAIN 达 90 帧（30Hz 约 3s）自动重配自愈
+    （QVAR,data_stale,reconfig 日志）；
+  - qvar_channel_reprobe 的 ACTIVE 分支改为回读 CTRL7 校验 ah_qvar_en，
+    链没了落到全序列重配（治好 SENS 关→开恢复路径）。
+协议与上位机：无需改动（§6.3 6B 帧 + valid 位图语义正确，上位机如实显示）。
+验证方法（上板）：连接上位机开流后看 RTT，应出现 IMU_STREAM,started 后
+  紧跟 QVAR,B,enabled（reconfigure 生效）；上位机静电 B 转绿、波形随
+  触碰 B 电极波动；RTT 若出现 QVAR,x,data_stale,reconfig 说明自愈触发。
+
+【问题 #010】（预留编号）

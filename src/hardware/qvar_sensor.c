@@ -64,6 +64,9 @@
 #define SENS_POWER_SETTLE_MS        25U
 #define QVAR_IO_FAIL_THRESHOLD      5U
 #define BRINGUP_READ_FRAMES         3U
+/* 僵尸 ACTIVE 自愈阈值：连续 EAGAIN（ah_qvarda 不置位且不算 IO 失败）
+ * 达此数即强制重跑 enable 序列。30Hz ODR 下 90 帧约 3s。 */
+#define QVAR_EAGAIN_REENABLE_LIMIT  90U
 
 static const struct device *const sens_i2c = DEVICE_DT_GET(SENS_I2C_NODE);
 
@@ -73,11 +76,12 @@ static struct {
 	enum qvar_zin zin;
 	bool sens_powered;
 	uint32_t io_fails;
+	uint32_t eagain_cnt;
 } chans[QVAR_CHANNEL_NUM] = {
 	{ .state = QVAR_CH_UNKNOWN, .zin = QVAR_ZIN_2400MOHM,
-	  .sens_powered = false, .io_fails = 0 },
+	  .sens_powered = false, .io_fails = 0, .eagain_cnt = 0 },
 	{ .state = QVAR_CH_UNKNOWN, .zin = QVAR_ZIN_2400MOHM,
-	  .sens_powered = false, .io_fails = 0 },
+	  .sens_powered = false, .io_fails = 0, .eagain_cnt = 0 },
 };
 
 static uint16_t qvar_addr_of(enum qvar_channel ch)
@@ -214,6 +218,7 @@ int qvar_channel_enable(enum qvar_channel ch, enum qvar_zin zin)
 
 	chans[ch].zin = zin;
 	chans[ch].io_fails = 0;
+	chans[ch].eagain_cnt = 0;
 	qvar_set_state(ch, QVAR_CH_ACTIVE);
 	printk("QVAR,%s,enabled,zin=%u,ctrl7=0x%02x\n",
 	       ch == QVAR_CHANNEL_A ? "A" : "B", (unsigned)zin, ctrl7);
@@ -224,6 +229,16 @@ io_fail:
 		qvar_set_state(ch, QVAR_CH_DEGRADED);
 	}
 	return ret;
+}
+
+int qvar_channel_reconfigure(enum qvar_channel ch)
+{
+	if (ch >= QVAR_CHANNEL_NUM) {
+		return -EINVAL;
+	}
+	/* 无条件全序列重配：芯片寄存器可能已被 sw_por/POR 清掉而软件
+	 * 状态仍 ACTIVE（僵尸 ACTIVE），enable 本身幂等可安全重跑 */
+	return qvar_channel_enable(ch, chans[ch].zin);
 }
 
 /** 单通道读 16bit QVAR（先查 ah_qvarda 就绪位） */
@@ -243,8 +258,19 @@ static int qvar_read_one(enum qvar_channel ch, int16_t *raw)
 		goto io_fail;
 	}
 	if ((status & STATUS_AH_QVARDA) == 0U) {
+		/* task-V1.10 僵尸 ACTIVE 自愈：QVAR 链被 IMU 驱动 sw_por /
+		 * SENS 域 POR 静默关闭时，I2C 应答正常、不算 IO 失败，
+		 * ah_qvarda 却永不置位，状态机永远停在 ACTIVE。连续无就绪
+		 * 达阈值即强制重跑 enable 序列恢复 CTRL7。 */
+		if (++chans[ch].eagain_cnt >= QVAR_EAGAIN_REENABLE_LIMIT) {
+			chans[ch].eagain_cnt = 0U;
+			printk("QVAR,%s,data_stale,reconfig\n",
+			       ch == QVAR_CHANNEL_A ? "A" : "B");
+			(void)qvar_channel_enable(ch, chans[ch].zin);
+		}
 		return -EAGAIN; /* 本帧未就绪，调用方按周期重试 */
 	}
+	chans[ch].eagain_cnt = 0U;
 
 	ret = qvar_reg_read(addr, LSM6DSV16X_REG_AH_QVAR_OUT_L, buf, 2);
 	if (ret != 0) {
@@ -358,7 +384,18 @@ int qvar_channel_reprobe(enum qvar_channel ch)
 		return -EINVAL;
 	}
 	if (chans[ch].state == QVAR_CH_ACTIVE) {
-		return 0;
+		/* task-V1.10：不再盲目短路。软件 ACTIVE 不代表寄存器还在
+		 * ——IMU 驱动 sw_por / SENS 域 POR 会清 CTRL7.ah_qvar_en
+		 * 而状态机不知情（静电 B 恒灰的帮凶）。回读校验，链没了
+		 * 就落到下面的全序列重配。 */
+		uint8_t ctrl7 = 0U;
+		uint16_t addr = qvar_addr_of(ch);
+
+		if (qvar_power_up() == 0 && qvar_present(addr) &&
+		    qvar_reg_read(addr, LSM6DSV16X_REG_CTRL7, &ctrl7, 1) == 0 &&
+		    (ctrl7 & CTRL7_AH_QVAR_EN) != 0U) {
+			return 0; /* 链确实活着 */
+		}
 	}
 
 	int ret = qvar_channel_enable(ch, chans[ch].zin);
@@ -374,6 +411,12 @@ int qvar_channel_enable(enum qvar_channel ch, enum qvar_zin zin)
 {
 	ARG_UNUSED(ch);
 	ARG_UNUSED(zin);
+	return -ENOTSUP;
+}
+
+int qvar_channel_reconfigure(enum qvar_channel ch)
+{
+	ARG_UNUSED(ch);
 	return -ENOTSUP;
 }
 

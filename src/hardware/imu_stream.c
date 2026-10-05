@@ -30,6 +30,7 @@
 #include <zephyr/sys/util.h>
 
 #include "power_control.h"
+#include "qvar_sensor.h"
 
 /** U4 设备树节点（app.overlay imu_u4: lsm6dsv16x@6b，deferred-init） */
 #define IMU_DT_NODE DT_NODELABEL(imu_u4)
@@ -245,6 +246,13 @@ int imu_stream_start(void)
 			return ret;
 		}
 		stream.dev_inited = true;
+		/* task-V1.10 修复：U4 驱动 init_chip（I2C 分支）里的
+		 * lsm6dsv16x_sw_por 会把包括 CTRL7 在内的全部寄存器复位，
+		 * 开机 qvar_bringup_test 设置的 ah_qvar_en 在此刻被抹掉
+		 * ——静电 B（QVAR-B/U4）从此僵尸 ACTIVE、上位机恒灰。
+		 * 驱动此刻已完成 XL/G 重配，立即恢复 QVAR-B（结果忽略：
+		 * U1 未插等场景由 qvar 通道自身的 ABSENT 语义处理）。 */
+		(void)qvar_channel_reconfigure(QVAR_CHANNEL_B);
 	}
 	if (!device_is_ready(imu_dev)) {
 		printk("IMU_STREAM,start_failed,not_ready\n");

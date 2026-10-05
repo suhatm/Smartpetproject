@@ -27,6 +27,7 @@
 #include <zephyr/sys/printk.h>
 
 #include "power_control.h"
+#include "qvar_sensor.h"
 
 /** U1 设备树节点（app.overlay imu_body_u1: lsm6dsv16x@6a，deferred-init） */
 #define BODY_IMU_DT_NODE DT_NODELABEL(imu_body_u1)
@@ -129,6 +130,11 @@ static int body_imu_ensure_driver(void)
 		return -ENODEV;
 	}
 	body.dev_inited = true;
+	/* task-V1.10 兜底：U1 驱动 init_chip（I2C 分支）的 sw_por 同样会
+	 * 清 CTRL7.ah_qvar_en（QVAR-A 链）。开机时序上 A 在 4.9 初始化、
+	 * 4.10 才使能 QVAR，本就安全；此处覆盖 reprobe / 域掉电重上电等
+	 * 任何再次走到 device_init 的路径（-EALREADY 重入无害）。 */
+	(void)qvar_channel_reconfigure(QVAR_CHANNEL_A);
 	return 0;
 }
 
