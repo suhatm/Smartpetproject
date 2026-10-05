@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-宠物环传感器控制  v1.08 正式版（真实 BLE 连接，tkinter）
+宠物环传感器控制  v1.09 正式版（真实 BLE 连接，tkinter）
 
 版本历史：
   v1.06  首版正式版（真实 BLE，协议 V0.5）
@@ -12,6 +12,12 @@
          WDT 复位窗口）；录音启动 6s 无 ACK 超时兜底（固件失败静默
          曾致按钮永久禁用）；录音中显示双麦克风实时电平；断线时复位
          SD 测试/下载挂起状态
+  v1.09  按协议 V0.5a 核对报告修复两处 bug：① IMU 数值二次换算（协议
+         §6.2 帧内 int16 已是 mg/dps×10 物理值，固件 imu_stream.c 换算
+         后直传，上位机原误乘 8000/32768、20000/32768 致显示缩小
+         4.096/1.638 倍）；② REPROBE 按钮无参下发（协议 §7.2 要求
+         sensor_id(1B)，无参固件直接回 result=-1），改为携带柔性板
+         外设 IMU_U1/QVAR/TEMP 三个 sensor_id 逐个下发
 
 与 host/petring_console_demo.py（模拟数据 DEMO）共用同一套界面：
 继承 demo 的 PetRingConsole，仅把 SimLink 换成真实 BleWorker
@@ -38,8 +44,8 @@ from bleak import BleakClient, BleakScanner
 from petring_console_demo import PetRingConsole, SimLink  # 复用界面与控件
 
 # ---------------------------------------------------------------- 版本信息
-APP_VERSION = "v1.08"           # 上位机版本
-APP_BUILD = "2026-10-03"        # 构建日期
+APP_VERSION = "v1.09"           # 上位机版本
+APP_BUILD = "2026-10-05"        # 构建日期
 APP_PROTOCOL = "V0.5a"          # 适配的通信协议版本
 
 RECONNECT_MAX = 10              # 意外断线自动重连次数上限
@@ -74,9 +80,9 @@ MOD_KEYS = ("IMU_U4", "IMU_U1", "QVAR_A", "QVAR_B",
 SD_TEST_ERR = {-1: "无卡/初始化失败", -2: "挂载失败", -3: "写失败",
                -4: "读失败", -5: "校验不一致"}
 
-# 原始码换算（与固件 overlay 一致：accel FS_8G、gyro FS_2000DPS）
-ACC_MG_PER_LSB = 8000.0 / 32768.0          # ±8g -> mg
-GYRO_DDPS_PER_LSB = 20000.0 / 32768.0      # ±2000dps -> 0.1dps（demo 显示单位）
+# IMU 帧内 int16 即物理值（协议 §6.2：accel 单位 mg、gyro 单位 dps×10，
+# 固件 imu_stream.c 已完成 m/s²→mg、rad/s→dps×10 换算后直传），
+# 上位机直接显示，不做二次换算（v1.09 核对报告修复）
 
 DOWNLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "downloads")
@@ -529,9 +535,13 @@ class PetRingLive(PetRingConsole):
         self.log(f"QVAR-{ch} 阈值下发 ±{v} LSB（滞回 50）。")
 
     def on_reprobe(self):
-        if self._send_cmd(0x06):
-            self.log("REPROBE 已下发：重新探测全部外设，"
-                     "状态变化经 EVENT 0x01 上报。")
+        # 协议 §7.2/§7.3：REPROBE 必须携带 sensor_id(1B)，无参时固件
+        # 直接回 result=-1 不执行重探测（v1.09 核对报告修复）。
+        # 柔性板外设逐个重探测（§10.4）：IMU_U1=1 / QVAR=2 / TEMP=4
+        for sid in (0x01, 0x02, 0x04):
+            self._send_cmd(0x06, bytes([sid]))
+        self.log("REPROBE 已下发（IMU_U1/QVAR/TEMP，sensor_id=1/2/4），"
+                 "结果见 CMD_ACK 与 EVENT 0x01。")
 
     def on_sd_refresh(self):
         self._send_cmd(0x10)
@@ -706,10 +716,9 @@ class PetRingLive(PetRingConsole):
         n = (len(payload) - 1) // 12
         last = None
         for i in range(n):
-            raw = struct.unpack_from("<6h", payload, 1 + i * 12)
-            f = tuple(int(round(raw[k] * ACC_MG_PER_LSB)) for k in range(3)) \
-                + tuple(int(round(raw[3 + k] * GYRO_DDPS_PER_LSB))
-                        for k in range(3))
+            # 帧内 int16 已是 mg / dps×10 物理值（协议 §6.2，固件直传），
+            # 直接使用；RMS 陀螺 /10 得 dps（下方统计沿用）
+            f = struct.unpack_from("<6h", payload, 1 + i * 12)
             last = f
             hist = self._imu_hist[key]
             hist.append(f)
