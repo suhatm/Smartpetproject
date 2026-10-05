@@ -74,7 +74,7 @@ enum {
 #define MOD_ST_ABSENT   2U
 #define MOD_ST_DEGRADED 3U
 
-#define FW_INFO_STRING "SmartPetRing v1.10;task-V1.10;hubV0.5"
+#define FW_INFO_STRING "SmartPetRing v1.11;task-V1.11;hubV0.5"
 
 #define FAST_PERIOD_MS  33U   /* ~30Hz：IMU/QVAR */
 #define SLOW_PERIOD_MS  1000U /* 1Hz：TEMP/STATUS；2s 分频：BATTERY */

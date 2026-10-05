@@ -151,7 +151,7 @@ class HubTest:
 
             info = await cli.read_gatt_char(UUID_INFO)
             info_s = info.decode(errors="replace")
-            report("读固件信息 0x24", "v1.10" in info_s, info_s)
+            report("读固件信息 0x24", "v1.11" in info_s, info_s)
 
             await cli.start_notify(UUID_DATA, self.on_data)
             await cli.start_notify(UUID_ACK, self.on_ack)
@@ -170,7 +170,7 @@ class HubTest:
 
             await cmd("11")
             a = await self.wait_ack(0x11)
-            report("GET_VERSION", a is not None and a[2] == 0 and b"v1.10" in a[3:],
+            report("GET_VERSION", a is not None and a[2] == 0 and b"v1.11" in a[3:],
                    bytes(a[3:]).decode(errors="replace") if a else "无应答")
 
             await cmd("10")
