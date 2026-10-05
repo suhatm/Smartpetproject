@@ -5,8 +5,18 @@
  * 线程模型：
  *   - GATT 回调（BT RX 线程）：写指令 -> k_msgq -> bridge 工作项消费；
  *     订阅状态原子记录；任何 ATT 活动喂僵尸看门狗。
- *   - pack_work（系统工作队列，50ms 周期/文件传输立即）：从两个帧缓冲
+ *   - pack_work（系统工作队列，20ms 周期/文件传输立即）：从两个帧缓冲
  *     （stream/ack）取出已封装帧，按 MTU-3 上限串联，bt_gatt_notify。
+ *
+ * task-V1.10 TX 拥塞修复（三管齐下）：
+ *   - 流通道字节预算（2×MTU-3/周期）：突发排空 2048B 会打满控制器
+ *     TX 缓冲并长时间霸占 sysworkq（波形一顿一顿、指令应答延迟、
+ *     洪泛诱发监督超时断链），预算把发送平滑到 ~24KB/s；
+ *   - 流缓冲满时丢最旧整帧（drop-oldest）替代拒收最新：实时流要
+ *     最新样本，旧积压越攒越久只会放大时延；SEQ 跳号上位机容忍；
+ *   - 打包周期 50ms→20ms：降低单帧等待上限，与预算配合平滑排空。
+ *     ACK 通道不设预算、满即拒收（应答不丢旧补新）；文件传输模式
+ *     维持立即+排空（REC_READ 有长度+CRC 兜底）。
  *
  * 连接管理沿用 ble_led_service 的实测结论：
  *   - disconnected 回调里不能同步 bt_le_adv_start（rc=-12），延迟 20ms 重试；
@@ -43,8 +53,18 @@
 /** 帧环形缓冲（已封装整帧字节流）：stream 与 ack 各一个 */
 #define FRAME_BUF_SIZE   2048U
 
-/** 打包周期（ms）：缓冲区非空即组包；文件传输时立即 */
-#define PACK_PERIOD_MS   50U
+/** 打包周期（ms）：缓冲区非空即组包；文件传输时立即。
+ *  task-V1.10 由 50ms 调至 20ms：配合流通道字节预算平滑发送，
+ *  单帧等待 + 打包延迟上限从 ~70ms 降到 ~40ms（波形更连贯）。 */
+#define PACK_PERIOD_MS   20U
+
+/** 流通道单周期发送字节预算（×room=MTU-3）：
+ *  突发排空 2048B 会瞬间打满控制器 TX 缓冲池（notify 连续失败、
+ *  5ms 重试空转），并长时间占用 sysworkq 拖慢 cmd_work / 传感器
+ *  采样（RTT 实锤：波形一顿一顿 + 洪泛诱发监督超时断链）。
+ *  2×room ≈ 488B/20ms = 24KB/s 平滑上限，远高于满速流负载
+ *  （~2KB/s），积压 2048B 也在 ~80ms 内排完。文件传输模式不设预算。 */
+#define STREAM_BUDGET_ROOMS  2U
 
 /** 指令接收队列深度 */
 #define CMD_MSGQ_DEPTH   8U
@@ -123,17 +143,12 @@ static uint8_t crc8_update(uint8_t crc, uint8_t byte)
 
 /* ---- 帧封装入缓冲 ---- */
 
-static int frame_buf_put(struct frame_buf *fb, uint8_t type,
-			 const uint8_t *payload, uint8_t len)
+static uint32_t stream_drop_oldest_cnt;
+
+/** 写入整帧（调用方持有 fb->lock 且已确认空间充足） */
+static void frame_buf_write(struct frame_buf *fb, uint8_t type,
+			    const uint8_t *payload, uint8_t len)
 {
-	uint16_t frame_len = FRAME_HDR_LEN + len + FRAME_CRC_LEN;
-
-	k_mutex_lock(&fb->lock, K_FOREVER);
-	if ((uint16_t)(fb->used + frame_len) > FRAME_BUF_SIZE) {
-		k_mutex_unlock(&fb->lock);
-		return -ENOMEM;
-	}
-
 	uint16_t w = fb->tail;
 	uint8_t crc = 0U;
 	uint8_t seq = fb->seq[type]++;
@@ -162,7 +177,59 @@ static int frame_buf_put(struct frame_buf *fb, uint8_t type,
 	w = (uint16_t)((w + 1U) % FRAME_BUF_SIZE);
 
 	fb->tail = w;
-	fb->used = (uint16_t)(fb->used + frame_len);
+	fb->used = (uint16_t)(fb->used + FRAME_HDR_LEN + len + FRAME_CRC_LEN);
+}
+
+/** ACK 通道入缓冲：满即拒收新帧（应答不可丢旧补新，量小不会触顶） */
+static int frame_buf_put(struct frame_buf *fb, uint8_t type,
+			 const uint8_t *payload, uint8_t len)
+{
+	uint16_t frame_len = FRAME_HDR_LEN + len + FRAME_CRC_LEN;
+
+	k_mutex_lock(&fb->lock, K_FOREVER);
+	if ((uint16_t)(fb->used + frame_len) > FRAME_BUF_SIZE) {
+		k_mutex_unlock(&fb->lock);
+		return -ENOMEM;
+	}
+	frame_buf_write(fb, type, payload, len);
+	k_mutex_unlock(&fb->lock);
+	return 0;
+}
+
+/**
+ * 流通道入缓冲（task-V1.10 TX 拥塞修复）：满时丢**最旧**整帧腾位。
+ * 旧实现拒收最新帧 → 积压越滚越旧、实时数据反而晚到 2.6s；
+ * drop-oldest 保最新样本、把最大时延钉在缓冲排空时间内，
+ * SEQ 跳号上位机本就容忍（协议 §4.1 SEQ 仅用于终端显示）。
+ * 头部必为整帧（put/take 均整帧操作），按 LEN 步进安全。
+ */
+static int frame_buf_put_stream(uint8_t type, const uint8_t *payload,
+				uint8_t len)
+{
+	uint16_t frame_len = FRAME_HDR_LEN + len + FRAME_CRC_LEN;
+	struct frame_buf *fb = &stream_buf;
+
+	k_mutex_lock(&fb->lock, K_FOREVER);
+	while ((uint16_t)(fb->used + frame_len) > FRAME_BUF_SIZE) {
+		uint8_t plen = fb->data[(fb->head + 4U) % FRAME_BUF_SIZE];
+		uint16_t flen = FRAME_HDR_LEN + plen + FRAME_CRC_LEN;
+
+		if (flen > fb->used) {
+			break; /* 防御：结构损坏时不越界 */
+		}
+		fb->head = (uint16_t)((fb->head + flen) % FRAME_BUF_SIZE);
+		fb->used = (uint16_t)(fb->used - flen);
+		stream_drop_oldest_cnt++;
+		if ((stream_drop_oldest_cnt % 100U) == 1U) {
+			printk("HUB,stream_drop_oldest,total=%u\n",
+			       stream_drop_oldest_cnt);
+		}
+	}
+	if ((uint16_t)(fb->used + frame_len) > FRAME_BUF_SIZE) {
+		k_mutex_unlock(&fb->lock);
+		return -ENOMEM; /* 防御：单帧超缓冲（协议上限 246B，不可达） */
+	}
+	frame_buf_write(fb, type, payload, len);
 	k_mutex_unlock(&fb->lock);
 	return 0;
 }
@@ -216,23 +283,42 @@ static uint16_t ack_pend_len;
 static uint8_t stream_pend[FRAME_HDR_LEN + FRAME_MAX_PAYLOAD + FRAME_CRC_LEN];
 static uint16_t stream_pend_len;
 
-/** 单通道发送：先补挂起包，再按 room 取新帧；失败保数据并停发（由调用方重调度） */
+/** notify 失败日志时间戳（拥塞期 5ms 重试不节流会刷屏 RTT，1s 一条） */
+static int64_t ack_fail_log_ms;
+static int64_t stream_fail_log_ms;
+
+/** 单通道发送：先补挂起包，再按 room×budget 取新帧；失败保数据并停发
+ *  （由调用方重调度）。budget=UINT16_MAX 表示不设预算（排空为止）。 */
 static void flush_channel(struct frame_buf *fb, const struct bt_gatt_attr *attr,
 			  uint8_t *pend, uint16_t *pend_len, uint16_t room,
-			  const char *tag)
+			  uint16_t budget, const char *tag, int64_t *log_stamp)
 {
+	uint16_t sent = 0U;
+
 	for (;;) {
 		if (*pend_len == 0U) {
-			*pend_len = frame_buf_take(fb, pend, room);
+			uint16_t left = (budget > sent) ? (uint16_t)(budget - sent) : 0U;
+			uint16_t want = (left < room) ? left : room;
+
+			if (want == 0U) {
+				return; /* 本周期字节预算用完，剩余下周期再发 */
+			}
+			*pend_len = frame_buf_take(fb, pend, want);
 			if (*pend_len == 0U) {
 				return; /* 缓冲空 */
 			}
 		}
 		if (bt_gatt_notify(NULL, attr, pend, *pend_len) == 0) {
+			sent = (uint16_t)(sent + *pend_len);
 			*pend_len = 0U;
 			continue;
 		}
-		printk("HUB,%s_notify_fail,n=%u\n", tag, *pend_len);
+		int64_t now = k_uptime_get();
+
+		if ((now - *log_stamp) >= 1000) {
+			*log_stamp = now;
+			printk("HUB,%s_notify_fail,n=%u\n", tag, *pend_len);
+		}
 		return; /* 保留 pend，等待重试 */
 	}
 }
@@ -264,11 +350,18 @@ static void pack_work_handler(struct k_work *work)
 		room = sizeof(pkt_buf);
 	}
 
-	/* ack 通道优先（应答/事件实时性高于数据流） */
+	/* ack 通道优先（应答/事件实时性高于数据流），不设预算排空 */
 	flush_channel(&ack_buf, &hub_svc.attrs[7], ack_pend, &ack_pend_len,
-		      room, "ack");
+		      room, UINT16_MAX, "ack", &ack_fail_log_ms);
+	/* 流通道按预算平滑发送（task-V1.10 TX 拥塞修复）；文件传输模式
+	 * 吞吐优先不设预算（REC_READ 有长度+CRC 兜底） */
+	uint16_t stream_budget = (atomic_get(&file_xfer) != 0)
+				 ? UINT16_MAX
+				 : (uint16_t)(room * STREAM_BUDGET_ROOMS);
+
 	flush_channel(&stream_buf, &hub_svc.attrs[2], stream_pend,
-		      &stream_pend_len, room, "data");
+		      &stream_pend_len, room, stream_budget, "data",
+		      &stream_fail_log_ms);
 
 	/* 还有未发完的数据（缓冲剩余或挂起包）：继续调度 */
 	bool pending;
@@ -299,13 +392,11 @@ static void pack_kick(void)
 	/* 帧入缓冲后调度打包。
 	 * 必须用 k_work_schedule（首次调度生效，后续 kick 不推迟）：
 	 * k_work_reschedule 会撤销并按 PACK_PERIOD_MS 重新提交 deadline，
-	 * 而数据流帧间隔（fast_work 33ms）< PACK_PERIOD_MS(50ms) 时
-	 * deadline 被每帧推后——pack_work 永续滑期永不触发，帧在
-	 * stream_buf 攒到 2048B 满（约 2.6s）才开始丢帧，仅靠 sysworkq
-	 * 偶发阻塞产生的 >50ms 空隙突发冲刷（波形一顿一顿、秒级延迟，
-	 * 突发洪泛 TX 还会诱发监督超时断链）。
+	 * 而数据流帧间隔（fast_work 33ms）> PACK_PERIOD_MS(20ms) 时
+	 * deadline 被每帧推后——pack_work 永续滑期永不触发（task-V1.09
+	 * 50ms 周期实锤：帧攒 2.6s 才突发冲刷，波形一顿一顿 + 洪泛断链）。
 	 * k_work_schedule 对已调度的 work 不改 deadline：首批帧后固定
-	 * 50ms 内必发，后续帧并入同批（一包 MTU 多帧，打包效率不变）。
+	 * 一个周期内必发，后续帧并入同批（一包 MTU 多帧，打包效率不变）。
 	 * 文件传输模式维持 K_NO_WAIT 立即发。 */
 	if (atomic_get(&file_xfer) != 0) {
 		k_work_reschedule(&pack_work, K_NO_WAIT);
@@ -583,11 +674,13 @@ int hub_stream_frame(uint8_t type, const uint8_t *payload, uint8_t len)
 	if ((current_conn == NULL) || (atomic_get(&stream_ccc) == 0)) {
 		return 0; /* 未订阅丢弃，不算错误 */
 	}
-	int ret = frame_buf_put(&stream_buf, type, payload, len);
+	int ret = frame_buf_put_stream(type, payload, len);
 
-	if (ret == 0) {
-		pack_kick();
-	}
+	/* kick 无条件（task-V1.10）：drop-oldest 下 put 可能"失败"但
+	 * 缓冲实际有数据；且 pack_work 若已被取空收尾、此后无新帧时
+	 * 不会自调度——旧代码仅在 put 成功时 kick 会漏调度，数据滞留
+	 * 到下一帧才被冲出去（把单帧时延放大一个采样周期）。 */
+	pack_kick();
 	return ret;
 }
 
