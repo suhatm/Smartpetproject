@@ -310,6 +310,8 @@ class PetRingLive(PetRingConsole):
         self._rx_buf = []                   # 帧监视行缓存（_tick 批量刷）
         self._rd_marks = []                 # 待重绘波形（_tick 批量刷）
         self._rd_marked = set()
+        self._pend_labels = {}              # 数值标签节流缓存（_tick 批量刷）
+        self._qvar_lamp_col = {}            # QVAR 告警灯当前色（去重 configure）
         super().__init__()
         self.title(f"宠物环传感器控制  {APP_VERSION} 正式版"
                    f"（真实 BLE · 协议 {APP_PROTOCOL}）")
@@ -782,9 +784,9 @@ class PetRingLive(PetRingConsole):
             self._refresh_mod_lamps()
         if st != 1:
             for lbl in self.imu_vals[key]:
-                lbl.configure(text="—")
-            self.imu_stats[key].configure(
-                text="RMS |a|   — mg\nRMS |g|   — dps")
+                self._throttled_set(lbl, "—")
+            self._throttled_set(
+                self.imu_stats[key], "RMS |a|   — mg\nRMS |g|   — dps")
             self._imu_hist[key].clear()
             return
         n = (len(payload) - 1) // 12
@@ -809,21 +811,36 @@ class PetRingLive(PetRingConsole):
         if last is None:
             return
         for lbl, val in zip(self.imu_vals[key], last):
-            lbl.configure(text=str(val))
+            self._throttled_set(lbl, str(val))
         hist = self._imu_hist[key]
         nh = len(hist)
         rms_a = math.sqrt(sum(s[0] ** 2 + s[1] ** 2 + s[2] ** 2
                               for s in hist) / nh)
         rms_g = math.sqrt(sum(s[3] ** 2 + s[4] ** 2 + s[5] ** 2
                               for s in hist) / nh) / 10
-        self.imu_stats[key].configure(
-            text=f"RMS |a| {rms_a:5.0f} mg\nRMS |g| {rms_g:5.1f} dps")
+        self._throttled_set(
+            self.imu_stats[key],
+            f"RMS |a| {rms_a:5.0f} mg\nRMS |g| {rms_g:5.1f} dps")
         ui = self.imu_ui[key]
         if ui["mode"].get() == "overview":
             self._rd(ui["wa"])
             self._rd(ui["wg"])
         else:
             self._rd(ui["ws"])
+
+    def _throttled_set(self, w, text):
+        """数值标签节流：同一标签 100ms 内多次更新只保留最新值，
+        _tick 统一 configure（IMU 30Hz×6 + QVAR 30Hz×2 + PVDF 10Hz×3
+        每帧直配会形成 ~400 次/s 的 Tcl 往返，挤占主线程导致操作
+        跟手性差）。"""
+        self._pend_labels[id(w)] = (w, text)
+
+    def _flush_labels(self):
+        if not self._pend_labels:
+            return
+        for w, text in self._pend_labels.values():
+            w.configure(text=text)
+        self._pend_labels.clear()
 
     def _h_imu_u4(self, payload):
         self._h_imu("U4", payload)
@@ -843,15 +860,19 @@ class PetRingLive(PetRingConsole):
                 self.link.mod_state[mk] = nst
                 changed = True
             if valid & bit:
-                self.qvar_vals[ch].configure(text=str(v))
+                self._throttled_set(self.qvar_vals[ch], str(v))
                 self.qvar_waves[ch].push(v)
                 self._rd(self.qvar_waves[ch])
                 alarm = abs(v) > self.link.qvar_thr[ch]
-                self.qvar_lamps[ch].configure(
-                    fg="#e74c3c" if alarm else "#3a4148")
+                col = "#e74c3c" if alarm else "#3a4148"
+                if self._qvar_lamp_col.get(ch) != col:
+                    self._qvar_lamp_col[ch] = col
+                    self.qvar_lamps[ch].configure(fg=col)
             else:
-                self.qvar_vals[ch].configure(text="—")
-                self.qvar_lamps[ch].configure(fg="#3a4148")
+                self._throttled_set(self.qvar_vals[ch], "—")
+                if self._qvar_lamp_col.get(ch) != "#3a4148":
+                    self._qvar_lamp_col[ch] = "#3a4148"
+                    self.qvar_lamps[ch].configure(fg="#3a4148")
         if changed:
             self._refresh_mod_lamps()
 
@@ -864,11 +885,11 @@ class PetRingLive(PetRingConsole):
             self._refresh_mod_lamps()
         if st != 1:
             for nm in ("heart_mv", "raw_mv", "ref_mv"):
-                self.pvdf_vals[nm].configure(text="—")
+                self._throttled_set(self.pvdf_vals[nm], "—")
             return
-        self.pvdf_vals["heart_mv"].configure(text=str(heart))
-        self.pvdf_vals["raw_mv"].configure(text=str(raw))
-        self.pvdf_vals["ref_mv"].configure(text=str(ref))
+        self._throttled_set(self.pvdf_vals["heart_mv"], str(heart))
+        self._throttled_set(self.pvdf_vals["raw_mv"], str(raw))
+        self._throttled_set(self.pvdf_vals["ref_mv"], str(ref))
         self.pvdf_wave.push(heart - ref)
         self._rd(self.pvdf_wave)
         self.pvdf_wave2.push(raw - ref)
@@ -1101,6 +1122,7 @@ class PetRingLive(PetRingConsole):
     def _flush_ui(self):
         if getattr(self, "frame_txt", None) is None:
             return                          # 基类 __init__ 尚未建好控件
+        self._flush_labels()                # 数值标签节流批量刷
         buf = self._rx_buf
         if buf:
             self._rx_buf = []
