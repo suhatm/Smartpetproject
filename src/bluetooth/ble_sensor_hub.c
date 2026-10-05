@@ -296,9 +296,22 @@ static void pack_work_handler(struct k_work *work)
 
 static void pack_kick(void)
 {
-	k_work_reschedule(&pack_work,
-			  (atomic_get(&file_xfer) != 0) ? K_NO_WAIT
-							: K_MSEC(PACK_PERIOD_MS));
+	/* 帧入缓冲后调度打包。
+	 * 必须用 k_work_schedule（首次调度生效，后续 kick 不推迟）：
+	 * k_work_reschedule 会撤销并按 PACK_PERIOD_MS 重新提交 deadline，
+	 * 而数据流帧间隔（fast_work 33ms）< PACK_PERIOD_MS(50ms) 时
+	 * deadline 被每帧推后——pack_work 永续滑期永不触发，帧在
+	 * stream_buf 攒到 2048B 满（约 2.6s）才开始丢帧，仅靠 sysworkq
+	 * 偶发阻塞产生的 >50ms 空隙突发冲刷（波形一顿一顿、秒级延迟，
+	 * 突发洪泛 TX 还会诱发监督超时断链）。
+	 * k_work_schedule 对已调度的 work 不改 deadline：首批帧后固定
+	 * 50ms 内必发，后续帧并入同批（一包 MTU 多帧，打包效率不变）。
+	 * 文件传输模式维持 K_NO_WAIT 立即发。 */
+	if (atomic_get(&file_xfer) != 0) {
+		k_work_reschedule(&pack_work, K_NO_WAIT);
+	} else {
+		k_work_schedule(&pack_work, K_MSEC(PACK_PERIOD_MS));
+	}
 }
 
 /* ---- GATT 回调 ---- */
