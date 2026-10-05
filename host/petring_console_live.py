@@ -49,8 +49,11 @@ APP_BUILD = "2026-10-05"        # 构建日期
 APP_PROTOCOL = "V0.5a"          # 适配的通信协议版本
 
 RECONNECT_MAX = 10              # 意外断线自动重连次数上限
-RECONNECT_DELAY_MS = 3000       # 每次重连间隔（覆盖固件 WDT 复位窗口）
+RECONNECT_DELAY_MS = 3000       # 重连基础间隔（覆盖固件 WDT 复位窗口）
+RECONNECT_DELAY_MAX_MS = 15000  # 重连间隔上限（线性退避：3/6/9/12/15s）
 REC_ACK_TIMEOUT = 6.0           # 录音启动 ACK 超时（s）
+CTRL_ACK_TIMEOUT = 3.0          # LED/电源指令 ACK 超时（s）
+STATUS_POLL_MS = 10000          # 连接期周期 GET_STATUS 校准间隔（ms）
 
 # ---------------------------------------------------------------- 协议常量
 # （与 tools/hub_protocol_test.py、固件 ble_sensor_hub.h 保持一致）
@@ -197,47 +200,74 @@ class BleWorker(threading.Thread):
 
     # ---- 任务 ----
     async def _do_scan(self):
-        try:
-            devs = await BleakScanner.discover(timeout=5.0,
-                                               return_adv=True)
-        except Exception as e:  # noqa: BLE001
-            self._cb(self.gui._on_scan_done, [], f"扫描失败：{e}")
-            return
+        # WinRT 扫描会话存在「静默失败」（start 返回但底层会话未建立，
+        # 表现为空结果）——实测空结果后隔 1s 重扫一次可恢复
         found = []
-        for addr, (dev, adv) in devs.items():
-            name = dev.name or ""
-            if "SmartPet" in name or "e5a00020" in "".join(
-                    str(u) for u in (adv.service_uuids or [])):
-                found.append((name or "SmartPet", addr, adv.rssi))
-        self._cb(self.gui._on_scan_done, found, "")
+        err = ""
+        for attempt in range(2):
+            try:
+                devs = await BleakScanner.discover(
+                    timeout=8.0 if attempt else 5.0, return_adv=True)
+            except Exception as e:  # noqa: BLE001
+                err = f"扫描失败：{e}"
+                break
+            found = []
+            for addr, (dev, adv) in devs.items():
+                name = dev.name or ""
+                # 注意：服务 UUID 常在 SCAN_RSP 内，Windows 被扫描
+                # 时机影响可能拿不到 → 同时按设备名兜底匹配
+                if "SmartPet" in name or "e5a00020" in "".join(
+                        str(u) for u in (adv.service_uuids or [])):
+                    found.append((name or "SmartPet", addr, adv.rssi))
+            if found:
+                break
+            await asyncio.sleep(1.0)
+        self._cb(self.gui._on_scan_done, found, err)
 
     async def _do_connect(self, addr):
         self._cb(self.gui._on_conn_state, "connecting", 0, b"")
-        client = BleakClient(
-            addr, disconnected_callback=lambda c: self._cb(
-                self.gui._on_conn_state, "dropped", 0, b""),
-            timeout=20.0,
-            # Windows 会缓存旧固件的 GATT 表，强制重新做服务发现
-            winrt={"use_cached_services": False})
-        try:
-            await client.connect()
-            self.client = client
-            await client.start_notify(UUID_DATA, self._notify_data)
-            await client.start_notify(UUID_ACK, self._notify_ack)
+        # 连接策略（2026-10-05 实测定稿）：
+        # ① 第一轮 use_cached_services=True——跳过强制服务发现，GATT
+        #    表由 Windows 缓存提供（首次无缓存时 WinRT 自动做发现），
+        #    避免 uncached 模式下服务发现的 ATT 密集往返触发链路死亡
+        #    （实测 uncached 常见 "Could not get GATT services:
+        #    Unreachable"，对应设备侧 conn establish 失败 reason=0x3e）
+        # ② 第二轮降级 False——强制重新服务发现，用于固件更新后
+        #    GATT 表变化导致缓存特征失效的场景
+        last_err = None
+        for attempt, use_cached in enumerate((True, False)):
+            client = BleakClient(
+                addr, disconnected_callback=lambda c: self._cb(
+                    self.gui._on_conn_state, "dropped", 0, b""),
+                timeout=20.0,
+                winrt={"use_cached_services": use_cached})
             try:
-                info = bytes(await client.read_gatt_char(UUID_INFO))
-            except Exception:  # noqa: BLE001
-                info = b""
-            self._cb(self.gui._on_conn_state, "connected",
-                     client.mtu_size, info)
-        except Exception as e:  # noqa: BLE001
-            try:
-                await client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
-            self.client = None
-            self._cb(self.gui._on_conn_state, "failed", 0,
-                     str(e).encode("utf-8", "replace"))
+                await client.connect()
+                self.client = client
+                await asyncio.wait_for(
+                    client.start_notify(UUID_DATA, self._notify_data), 8.0)
+                await asyncio.wait_for(
+                    client.start_notify(UUID_ACK, self._notify_ack), 8.0)
+                try:
+                    info = bytes(await asyncio.wait_for(
+                        client.read_gatt_char(UUID_INFO), 6.0))
+                except Exception:  # noqa: BLE001
+                    info = b""
+                self._cb(self.gui._on_conn_state, "connected",
+                         client.mtu_size, info)
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                # 彻底清理本次半开连接，防 WinRT 残留会话
+                try:
+                    await client.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.client = None
+                if attempt == 0:
+                    await asyncio.sleep(1.5)   # 栈冷却后再降级重试
+        self._cb(self.gui._on_conn_state, "failed", 0,
+                 str(last_err).encode("utf-8", "replace"))
 
     async def _do_disconnect(self):
         if self.client is not None:
@@ -252,7 +282,11 @@ class BleWorker(threading.Thread):
         if self.client is None or not self.client.is_connected:
             self._cb(self.gui._on_worker_error, "write", "未连接")
             return
-        await self.client.write_gatt_char(UUID_CMD, data, response=True)
+        # 链路将死时 write 可能长期挂起并堵死整个指令队列
+        # （后续 disconnect 也发不出去）——加 5s 超时兜底
+        await asyncio.wait_for(
+            self.client.write_gatt_char(UUID_CMD, data, response=True),
+            5.0)
 
     # ---- Notify 回调（worker 线程上下文，仅解析后抛回 GUI）----
     def _notify_data(self, _char, data: bytearray):
@@ -295,6 +329,8 @@ class PetRingLive(PetRingConsole):
         self._user_disconnect = False   # 手动断开则不自动重连
         self._closing = False
         self._rec_pending_since = 0.0
+        self._ctrl_pending = {}         # cmd -> 确认截止时刻（LED/PWR）
+        self._status_poll_cnt = 0       # 周期 GET_STATUS 计数（_tick 驱动）
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self.log(f"正式版 {APP_VERSION}（构建 {APP_BUILD}，协议 {APP_PROTOCOL}）："
@@ -385,7 +421,10 @@ class PetRingLive(PetRingConsole):
                                for n, (_, r) in
                                ((v, self.devices[v]) for v in values)))
         else:
-            self.log("未发现 SmartPet 设备（确认固件已烧录且未被他机连接）。")
+            self.log("未发现 SmartPet 设备（已自动重扫一次）。排查："
+                     "①设备是否被他机占用（连接态不广播）；②设备指示灯"
+                     "是否在闪；③关闭再开启电脑蓝牙后重扫（WinRT 扫描"
+                     "会话偶发静默失败）。")
 
     def on_connect(self):
         if self.link.connected:
@@ -405,20 +444,26 @@ class PetRingLive(PetRingConsole):
         self.worker.submit("connect", self._reconnect_addr)
 
     def _schedule_reconnect(self):
-        """意外断线后的自动重连：固定间隔重试，覆盖固件 WDT 复位窗口。"""
+        """意外断线后的自动重连：线性退避（3/6/9/…/15s，覆盖固件 WDT
+        复位窗口）。固定短间隔会在 WinRT 内部触发 0.4s 级连接风暴，
+        实测（2026-10-05 RTT 取证）会把设备打进 LL 建立失败循环。"""
         if self._closing or self._user_disconnect:
             return
         if self._reconnect_addr is None:
             return
         if self._reconnect_attempts >= RECONNECT_MAX:
-            self.log("自动重连失败：请确认设备在范围内后重新扫描连接。")
+            self.log("自动重连失败：请确认设备在范围内后重新扫描连接。"
+                     "若仍失败，可尝试关闭再开启电脑蓝牙（清除 WinRT "
+                     "残留会话）或复位设备。")
             self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
             return
         self._reconnect_attempts += 1
+        delay = min(RECONNECT_DELAY_MS * self._reconnect_attempts,
+                    RECONNECT_DELAY_MAX_MS)
         self.lbl_conn.configure(
             text=f"● 重连中（{self._reconnect_attempts}/{RECONNECT_MAX}）…",
             fg="#f1c40f")
-        self.after(RECONNECT_DELAY_MS, lambda: self.worker.submit(
+        self.after(delay, lambda: self.worker.submit(
             "connect", self._reconnect_addr))
 
     def _on_conn_state(self, state, mtu, info):
@@ -443,10 +488,13 @@ class PetRingLive(PetRingConsole):
             ver = info.decode("utf-8", "replace") if info else ""
             self.log(f"已连接，MTU={mtu}，已订阅 0x21/0x23。"
                      + (f"固件信息：{ver}" if ver else ""))
-            # 连接即取版本/状态/电量
-            self._send_cmd(0x11)            # GET_VERSION
-            self._send_cmd(0x10)            # GET_STATUS -> 0x10 帧
-            self._send_cmd(0x0C)            # GET_BATTERY -> 0x08 帧
+            # 连接后取版本/状态/电量：分批下发（300/800/1300ms）。
+            # 刚建立的连接 MTU/连接参数尚未稳定，立即三连发会形成
+            # ATT 突发流，实测易触发链路监督超时（reason=0x08）
+            self.after(300, lambda: self._send_cmd(0x11))   # GET_VERSION
+            self.after(800, lambda: self._send_cmd(0x10))   # GET_STATUS→0x10
+            self.after(1300, lambda: self._send_cmd(0x0C))  # GET_BATTERY→0x08
+            self._status_poll_cnt = 0
             return
         # failed / dropped / disconnected
         was = self.link.connected
@@ -469,6 +517,7 @@ class PetRingLive(PetRingConsole):
         if state == "dropped":
             self.log("连接意外断开，尝试自动重连……")
             self.term_print("<< LINK DOWN")
+            self._reset_ctrl_ui()
             self.lbl_conn.configure(
                 text=f"● 重连中（0/{RECONNECT_MAX}）…", fg="#f1c40f")
             self._schedule_reconnect()
@@ -483,6 +532,10 @@ class PetRingLive(PetRingConsole):
             return
         # 主动断开（disconnected）
         self.lbl_conn.configure(text="● 未连接", fg="#e74c3c")
+        # 协议 §7.4：BLE 断开后 LED override 自动归还设备状态机——
+        # UI 的灯/电源显示同步复位为「未知」（灰），避免残留旧状态
+        # 误导（下次连接后由 0x10 MODULE_STATUS 权威刷新）
+        self._reset_ctrl_ui()
         if was:
             self.log("已断开。LED override 归还电源 UI 状态机（协议 §7.4）。")
 
@@ -507,20 +560,41 @@ class PetRingLive(PetRingConsole):
         self.worker.submit("write", data)
         return True
 
+    def _reset_ctrl_ui(self):
+        """LED/电源显示复位为「未知」：断开连接后设备实况不可知
+        （协议 §7.4 override 已归还设备状态机）。"""
+        self.link.led = [False, False]
+        self.link.pwr = {"SENS": False, "STORE": False, "ANALOG": False}
+        self._ctrl_pending.clear()
+        for lamp, _color in self.led_lamps:
+            lamp.configure(fg="#3a4148")
+        for dom in self.pwr_lamps:
+            self.pwr_lamps[dom].configure(fg="#3a4148")
+
+    def _ctrl_sent(self, cmd, desc):
+        """记录一条待确认控制指令；超时由 _tick 检查。"""
+        self._ctrl_pending[cmd] = time.monotonic() + CTRL_ACK_TIMEOUT
+        self.term_print(f".. {desc} 待设备确认（≤{CTRL_ACK_TIMEOUT:.0f}s）")
+
     def on_led(self, idx, on):
         self.link.led[idx] = on
         lamp, color = self.led_lamps[idx]
-        lamp.configure(fg=color if on else "#3a4148")
+        lamp.configure(fg=color if on else "#3a4148")   # 乐观显示
         mask = (1 if self.link.led[0] else 0) | (2 if self.link.led[1] else 0)
-        self._send_cmd(0x01, bytes([mask]))
+        if self._send_cmd(0x01, bytes([mask])):
+            # 真实生效状态以 0x10 帧 LED 实况为准
+            # （固件 task-V1.07 起上报实际值，故障/按键图案优先级
+            # 更高时 override 未必生效）
+            self._ctrl_sent(0x01, f"LED_SET mask=0x{mask:02X}")
 
     def on_pwr(self, dom, on):
         self.link.pwr[dom] = on
         self.pwr_lamps[dom].configure(fg="#2ecc71" if on else "#3a4148")
         d = {"SENS": 0, "STORE": 1, "ANALOG": 2}[dom]
-        self._send_cmd(0x02, bytes([d, 1 if on else 0]))
-        if dom == "ANALOG" and on:
-            self.log("ANALOG 上电：首次约 1200ms VBIAS 稳定等待（协议 §10.3）。")
+        if self._send_cmd(0x02, bytes([d, 1 if on else 0])):
+            self._ctrl_sent(0x02, f"PWR_SET {dom}={'ON' if on else 'OFF'}")
+            if dom == "ANALOG" and on:
+                self.log("ANALOG 上电：首次约 1200ms VBIAS 稳定等待（协议 §10.3）。")
 
     def on_pwr_all(self, on):
         for dom in ("SENS", "STORE", "ANALOG"):
@@ -914,6 +988,19 @@ class PetRingLive(PetRingConsole):
             self.lbl_sd_status.configure(text="就绪")
         elif cmd == 0x0D and result != 0:   # SD_TEST 立即失败
             self._sd_test_done(result, 0, 0, 0)
+        elif cmd in (0x01, 0x02):           # LED_SET / PWR_SET
+            # 控制指令确认闭环：成功即拉一帧 MODULE_STATUS 用设备
+            # 实况校准 UI（0x10 帧 LED/电源字段上报实际生效值）；
+            # 失败时同样拉状态帧回滚乐观显示
+            was_pending = cmd in self._ctrl_pending
+            self._ctrl_pending.pop(cmd, None)
+            if result != 0 and was_pending:
+                hint = { -1: "参数非法", -11: "录音/传输进行中拒绝断电"}.get(
+                    result, f"result={result}")
+                self.log(f"{CMD_NAMES[cmd]} 被设备拒绝：{hint}。"
+                         "界面已按设备实况回滚。")
+            if was_pending:
+                self._send_cmd(0x10)        # 请求 MODULE_STATUS 校准 UI
 
     def _h_event(self, payload):
         eid = payload[0]
@@ -1073,6 +1160,25 @@ class PetRingLive(PetRingConsole):
             self._rec_pending = False
             self.btn_rec_start.configure(state="normal")
             self.log("录音启动超时：未收到 ACK（确认连接与 SD 状态后重试）。")
+        # LED/电源指令 ACK 超时：链路不通时及时回滚乐观显示
+        pending = getattr(self, "_ctrl_pending", None)
+        if pending:
+            now = time.monotonic()
+            for cmd in [c for c, ddl in pending.items() if now > ddl]:
+                pending.pop(cmd)
+                self.log(f"{CMD_NAMES.get(cmd, '?')} 超时未确认："
+                         "链路可能不通，界面将按设备实况回滚。")
+                self._send_cmd(0x10)        # 试拉状态帧（可能也失败）
+        # 连接期周期状态校准：GET_STATUS → 0x10 MODULE_STATUS
+        # 权威刷新 LED/电源/模块状态（100ms tick × 100 = 10s）
+        if getattr(lk, "connected", False) and not getattr(self, "_closing",
+                                                            False):
+            self._status_poll_cnt = getattr(self, "_status_poll_cnt", 0) + 1
+            if self._status_poll_cnt >= STATUS_POLL_MS // 100:
+                self._status_poll_cnt = 0
+                self._send_cmd(0x10)
+        else:
+            self._status_poll_cnt = 0
         self.after(100, self._tick)
 
 
