@@ -19,6 +19,19 @@
 int status_led_set(bool red, bool blue);
 
 /**
+ * @brief 读取当前实际生效的 LED 状态（status_led_set 缓存值）
+ *
+ * 主循环每 20ms 调 status_led_set 刷新，缓存即当前物理输出。
+ * MODULE_STATUS 帧上报 LED 实况用（上报真实值而非 override 请求值，
+ * 避免充电模式等"override 未生效"场景下 UI 与实灯不一致）。
+ *
+ * @param red 输出 LED0（红）当前状态
+ * @param blue 输出 LED1（蓝）当前状态
+ * @return 0 成功；-ENODEV 尚未初始化（缓存无效）
+ */
+int status_led_get(bool *red, bool *blue);
+
+/**
  * @brief 阻塞式脉冲：点亮 on_ms，再熄灭，可选再等待 off_ms
  *
  * @return 0 成功；负值 LED 设置失败

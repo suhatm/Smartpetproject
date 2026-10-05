@@ -1,0 +1,99 @@
+《可配置项.txt》— LIHAObohuan 宠物环 电源UI固件
+=================================================
+更新：2026-09-30（task-V1.00）
+配置方式：prj.conf 中写 CONFIG_xxx=value，或 menuconfig 调整；
+未写则使用下表"默认值"。全部选项集中在工程根目录 Kconfig。
+
+一、LED 指示类
+--------------------------------------------------------------
+1. CONFIG_APP_HEARTBEAT_LED          【可选项·默认开 y】
+   名称：正常工作心跳指示
+   作用：ACTIVE（正常工作）期间，LED0(红)+LED1(蓝) 每 5 秒同时
+         快闪 100ms，提供"设备正在工作"的持续可见指示。
+   取值：y / n
+   默认：y（开）——满足"正常工作有可见指示"的产品需求。
+   注意：与省电存在权衡。宠物环常佩戴场景若追求极限续航，
+         置 n 后正常工作期间灯全灭（开机/关机灯效不受影响）。
+   周期与闪烁时长可细调：
+     CONFIG_APP_HEARTBEAT_PERIOD_MS  默认 5000（范围 1000~60000）
+     CONFIG_APP_HEARTBEAT_FLASH_MS   默认 100 （范围 20~500）
+
+2. CONFIG_APP_BOOT_LED_INDICATION    【可选项·默认开 y】
+   名称：开机/就绪灯效
+   作用：开机 LED0(红) 闪 3 秒 → 就绪 LED0+LED1 同闪 3 秒。
+         关闭后跳过灯效直接进主循环（关机蓝闪不受影响）。
+   取值：y / n；默认 y。
+
+3. CONFIG_APP_LED_INDICATION_MS      默认 3000（范围 500~10000）
+   开机/关机/就绪指示图案的持续时长（产品方案要求 3 秒）。
+
+4. CONFIG_APP_LED_BLINK_PERIOD_MS    默认 300（范围 50~1000）
+   上述 3 秒图案的亮/灭半周期（300ms 亮 / 300ms 灭）。
+
+二、按键行为类
+--------------------------------------------------------------
+5. CONFIG_APP_SHUTDOWN_HOLD_MS       默认 3000（范围 1000~9000）
+   关机判定时长：按住达到该时长后"松开"才触发优雅关机
+   （防宠物佩戴误触；PMIC 10 秒应急复位为硬件行为，不可配）。
+
+6. CONFIG_APP_SHORT_PRESS_MAX_MS     默认 1000（范围 100~2000）
+   短按上限：松开时按住小于该值视为短按（蓝灯双闪状态确认）。
+
+三、调试/测试类
+--------------------------------------------------------------
+7. CONFIG_APP_POWER_DOMAIN_SELFTEST  【可选项·默认开 y】
+   名称：开机电源域自检
+   作用：开机阶段依次单独开/关 SENS / STORE / ANALOG 三路电源域
+         并回读校验，RTT 打印 SELFTEST PASS/FAIL。
+   取值：y / n；默认 y。
+   注意：量产固件建议置 n，缩短开机时间约 0.15s。
+
+8. CONFIG_APP_POWER_DOMAIN_TEST_MB   【可选项·默认开 y】（task-V1.01 新增）
+   名称：SWD 电源域测试邮箱
+   作用：上位机 tools/power_domain_test.py 经调试器（nrfutil）读写
+         RAM 邮箱（符号 power_test_mb，地址见 build/zephyr/zephyr.map），
+         下发三电源域独立开关命令：
+           on/off sens|store|ana  —— 单域独立开关
+           on/off all             —— 三域全开/全关
+           status                 —— 查询三域状态
+           cycle                  —— 自动化独立性测试（逐域开关+全开全关）
+   取值：y / n；默认 y。
+   注意：仅调试用（依赖 J-Link SWD 访问），量产固件必须置 n。
+
+使用示例（prj.conf）：
+--------------------------------------------------------------
+# 关闭心跳指示（最省电）
+CONFIG_APP_HEARTBEAT_LED=n
+# 心跳改为每 10 秒闪 50ms
+CONFIG_APP_HEARTBEAT_PERIOD_MS=10000
+CONFIG_APP_HEARTBEAT_FLASH_MS=50
+# 关机改为长按 5 秒
+CONFIG_APP_SHUTDOWN_HOLD_MS=5000
+# 量产固件关闭调试用测试邮箱
+CONFIG_APP_POWER_DOMAIN_TEST_MB=n
+
+变更记录：
+--------------------------------------------------------------
+2026-09-30  新增心跳指示 APP_HEARTBEAT_LED（默认开）及本文档。
+2026-09-30  task-V1.01 新增 SWD 电源域测试邮箱
+            APP_POWER_DOMAIN_TEST_MB（默认开，量产须关）及上位机
+            tools/power_domain_test.py。
+
+9. CONFIG_APP_BLE_LED_TEST            【可选项·默认开 y】（task-V1.02 新增）
+   名称：蓝牙从机 LED 测试服务（nRF Connect App 控制）
+   作用：开启 BLE 从机，广播名 SmartPet，注册自定义 GATT 服务
+         e5a00001-1e5c-4b8f-9a2d-6c0f7e8d9a0b，特征值 e5a00002
+         （Read/Write，1 字节位图：bit0=LED0红 bit1=LED1蓝）。
+         手机 nRF Connect App 连接后可开关两灯，且不影响原有
+         LED 状态机（BLE 显示层优先级低于故障/按键/充电，仅在
+         ACTIVE 空闲态覆盖心跳层；断开连接自动清除）。
+   依赖：需同时开 CONFIG_BT=y / CONFIG_BT_PERIPHERAL=y /
+         CONFIG_BT_DEVICE_NAME="SmartPet"（prj.conf 已配好）。
+   取值：y / n；默认 y。
+   注意：量产固件建议置 n（省电；且当前免配对明文写入有安全
+         风险，量产前需评估配对/加密）。
+
+变更记录追加：
+2026-09-30  task-V1.02 新增蓝牙从机 LED 测试服务
+            APP_BLE_LED_TEST（默认开，量产须关），
+            详见 docs/蓝牙驱动测试方案.md。
