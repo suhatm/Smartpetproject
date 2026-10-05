@@ -474,15 +474,25 @@ static void zombie_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-#if CONFIG_APP_BLE_IDLE_TIMEOUT_SEC > 0
+#if (CONFIG_APP_BLE_IDLE_TIMEOUT_SEC > 0) || \
+	(CONFIG_APP_BLE_SUBSCRIBED_IDLE_TIMEOUT_SEC > 0)
 	if (current_conn != NULL) {
 		int64_t idle = (k_uptime_get() / 1000) -
 			       (int64_t)atomic_get(&last_activity_sec);
 		bool any_ccc = (atomic_get(&stream_ccc) != 0) ||
 			       (atomic_get(&ack_ccc) != 0);
+		/* 未订阅：短超时（旧语义）；已订阅：长超时。
+		 * 已订阅分支 2026-10-05 新增——应用层死亡但系统蓝牙栈
+		 * 维持 LL 心跳的僵尸会话（RTT 实锤：设备停在已连接态
+		 * 不广播），ATT 交互静默是唯一可靠判据；正常上位机按
+		 * 协议 V0.5c 周期 GET_STATUS（≤10s）永不触发。 */
+		int32_t timeout = any_ccc
+			? CONFIG_APP_BLE_SUBSCRIBED_IDLE_TIMEOUT_SEC
+			: CONFIG_APP_BLE_IDLE_TIMEOUT_SEC;
 
-		if (!any_ccc && (idle >= CONFIG_APP_BLE_IDLE_TIMEOUT_SEC)) {
-			printk("HUB,zombie_disconnect,idle_s=%lld\n", idle);
+		if ((timeout > 0) && (idle >= timeout)) {
+			printk("HUB,zombie_disconnect,idle_s=%lld,sub=%u\n",
+			       idle, any_ccc ? 1U : 0U);
 			(void)bt_conn_disconnect(current_conn,
 						 BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			return;

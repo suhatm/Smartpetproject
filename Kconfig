@@ -87,8 +87,8 @@ config APP_BLE_IDLE_TIMEOUT_SEC
 	default 120
 	range 0 3600
 	help
-	  僵尸连接看门狗：连接后若【未订阅 Notify】且持续该时长没有任何
-	  读/写/订阅操作，固件主动断开并重新广播。
+	  僵尸连接看门狗（未订阅分支）：连接后若【未订阅 Notify】且
+	  持续该时长没有任何读/写/订阅操作，固件主动断开并重新广播。
 
 	  背景：BLE 链路层监督超时（prj.conf 当前 0.42s）只能救"手机走远/
 	  关蓝牙"；若手机 App 被直接杀死而系统蓝牙仍开着、且设备在通信
@@ -98,6 +98,24 @@ config APP_BLE_IDLE_TIMEOUT_SEC
 
 	  判定刻意保守：订阅中的活跃连接永不断开；任何一次读特征值、
 	  写控制点、订阅/取消订阅都会刷新活动时间戳。置 0 禁用。
+
+config APP_BLE_SUBSCRIBED_IDLE_TIMEOUT_SEC
+	int "BLE zombie-connection idle timeout while subscribed (seconds, 0 = disabled)"
+	depends on APP_SENSOR_HUB
+	default 300
+	range 0 3600
+	help
+	  僵尸连接看门狗（已订阅分支，2026-10-05 新增）：已订阅 Notify
+	  的连接，若持续该时长没有任何 ATT 层交互（读 0x24 / 写 0x22 /
+	  CCC 变更），固件主动断开并重新广播。
+
+	  背景：上位机应用异常退出（进程被杀/崩溃）但系统蓝牙栈仍维持
+	  链路层心跳时，旧看门狗的「订阅中不断开」策略让僵尸会话永存
+	  （2026-10-05 RTT 实锤：设备停在已连接态不广播，任何主机连
+	  不上）。链路层无法区分「应用活着在收」与「应用死了只剩 LL
+	  ACK」，ATT 交互静默是唯一可靠判据。协议 V0.5c 起要求上位机
+	  连接期间周期发送 GET_STATUS（建议 ≤10s），正常上位机永不触
+	  发本超时。置 0 禁用（退回旧「订阅中不断开」行为）。
 
 config APP_HW_WATCHDOG
 	bool "Hardware watchdog (wdt31) as last-resort hang recovery"
