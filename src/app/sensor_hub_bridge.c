@@ -74,7 +74,7 @@ enum {
 #define MOD_ST_ABSENT   2U
 #define MOD_ST_DEGRADED 3U
 
-#define FW_INFO_STRING "SmartPetRing v1.07;task-V1.07;hubV0.5"
+#define FW_INFO_STRING "SmartPetRing v1.09;task-V1.09;hubV0.5"
 
 #define FAST_PERIOD_MS  33U   /* ~30Hz：IMU/QVAR */
 #define SLOW_PERIOD_MS  1000U /* 1Hz：TEMP/STATUS；2s 分频：BATTERY */
@@ -375,10 +375,15 @@ static void qvar_tick(void)
 		return; /* 双通道都无效不发帧 */
 	}
 
-	uint8_t st = (qvar_a_effective_state() == MOD_ST_PRESENT ||
-		      qvar_b_effective_state() == MOD_ST_PRESENT)
-			     ? MOD_ST_PRESENT
-			     : MOD_ST_ABSENT;
+	/* 帧级状态（协议 §6.1，task-V1.09）：任一通道 DEGRADED 时报 DEGRADED，
+	 * 上位机按 valid 位图区分——有效通道显示 PRESENT，无效通道落到帧级
+	 * DEGRADED（V0.5 补充：QVAR-B 电极经 FPC 引出，FPC 异常判 DEGRADED
+	 * 而非 ABSENT）。原实现只报 PRESENT/ABSENT，无效通道被误显示为 ABSENT。 */
+	uint8_t st_a = qvar_a_effective_state();
+	uint8_t st_b = qvar_b_effective_state();
+	uint8_t st = (st_a == MOD_ST_DEGRADED || st_b == MOD_ST_DEGRADED)
+			     ? MOD_ST_DEGRADED
+			     : MOD_ST_PRESENT;
 
 	payload[0] = st;
 	payload[1] = (uint8_t)(s.a_raw & 0xFF);

@@ -66,7 +66,7 @@ static const struct bt_uuid_128 hub_info_uuid =
 	BT_UUID_INIT_128(HUB_UUID_BYTES(0x24));
 
 /** 固件信息字符串（e5a00024 / GET_VERSION 共用） */
-#define FW_INFO_STRING "SmartPetRing v1.07;task-V1.07;hubV0.5"
+#define FW_INFO_STRING "SmartPetRing v1.09;task-V1.09;hubV0.5"
 
 /* ---- 帧缓冲 ---- */
 
