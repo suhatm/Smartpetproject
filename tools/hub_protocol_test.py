@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-宠物环 Sensor Hub 协议上板测试（task-V1.06，协议 V0.5）
+宠物环 Sensor Hub 协议上板测试（task-V1.09，协议 V0.5a）
 
-覆盖：连接/MTU/信息读取、帧解析+CRC8 校验、全指令 ACK、
-传感器帧流统计、录音->列表->下载(CRC32 校验)->删除、SD_TEST、
-低电/事件帧观察。bleak + Windows 蓝牙。
+覆盖：连接/MTU/信息读取、帧解析+CRC8 校验、全指令 ACK（含 REPROBE
+带参/无参语义）、传感器帧流统计、录音->列表->下载(CRC32 校验)->删除、
+SD_TEST、低电/事件帧观察。bleak + Windows 蓝牙。
 
 用法：
     python tools/hub_protocol_test.py [--quick] [--no-rec]
@@ -151,7 +151,7 @@ class HubTest:
 
             info = await cli.read_gatt_char(UUID_INFO)
             info_s = info.decode(errors="replace")
-            report("读固件信息 0x24", "v1.06" in info_s, info_s)
+            report("读固件信息 0x24", "v1.09" in info_s, info_s)
 
             await cli.start_notify(UUID_DATA, self.on_data)
             await cli.start_notify(UUID_ACK, self.on_ack)
@@ -170,7 +170,7 @@ class HubTest:
 
             await cmd("11")
             a = await self.wait_ack(0x11)
-            report("GET_VERSION", a is not None and a[2] == 0 and b"v1.06" in a[3:],
+            report("GET_VERSION", a is not None and a[2] == 0 and b"v1.09" in a[3:],
                    bytes(a[3:]).decode(errors="replace") if a else "无应答")
 
             await cmd("10")
@@ -204,6 +204,24 @@ class HubTest:
             await cmd("08 00 F4 01 10")  # QVAR_THR_SET ch=0 thr=500 hyst=16
             a = await self.wait_ack(0x08)
             report("QVAR_THR_SET", a is not None and a[2] == 0)
+
+            # ---- REPROBE（task-V1.09：协议 §7.2 要求 sensor_id(1B)） ----
+            await cmd("06")  # 无参：固件应回 result=-1 拒执行
+            a = await self.wait_ack(0x06)
+            report("REPROBE 无参应答-1", a is not None and a[2] == 255,
+                   f"result={a[2] - 256 if a and a[2] > 127 else (a[2] if a else '?')}")
+            await cmd("06 01")  # sensor_id=1 IMU_U1（柔性板六轴）
+            a = await self.wait_ack(0x06)
+            report("REPROBE(IMU_U1)", a is not None and a[2] in (0, 1),
+                   f"result={a[2]}（0=在位 1=仍不在位）")
+            await cmd("06 02")  # sensor_id=2 QVAR
+            a = await self.wait_ack(0x06)
+            report("REPROBE(QVAR)", a is not None and a[2] in (0, 1),
+                   f"result={a[2]}")
+            await cmd("06 04")  # sensor_id=4 TEMP
+            a = await self.wait_ack(0x06)
+            report("REPROBE(TEMP)", a is not None and a[2] in (0, 1),
+                   f"result={a[2]}")
 
             # ---- 帧流统计 ----
             wait_s = 4 if quick else 8
